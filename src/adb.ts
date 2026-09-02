@@ -1,62 +1,86 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { device } from './config.js';
-
 const run = promisify(execFile);
 
-const keys = { HOME: 3, UP: 19, DOWN: 20, LEFT: 21, RIGHT: 22, ENTER: 66, BACK: 4 } as const;
+export const keyCodes = {
+  HOME: 3,
+  BACK: 4,
+  DPAD_UP: 19,
+  DPAD_DOWN: 20,
+  DPAD_LEFT: 21,
+  DPAD_RIGHT: 22,
+  VOLUME_UP: 24,
+  VOLUME_DOWN: 25,
+  ENTER: 66,
+  PLAY_PAUSE: 85,
+  MUTE: 164,
+} as const;
 
-export type RemoteKey = keyof typeof keys;
-
-async function adb(args: string[], encoding: BufferEncoding = 'utf8') {
-  return run('adb', args, { timeout: 15000, maxBuffer: 5_000_000, encoding });
-}
+export type RemoteKey = keyof typeof keyCodes;
 
 export class AdbService {
+  constructor(
+    private readonly host: string,
+    private readonly port = 5555,
+  ) {}
+
+  private get target() {
+    return `${this.host}:${this.port}`;
+  }
+
+  private execute(args: string[], options: Record<string, unknown> = { encoding: 'utf8' }) {
+    return run('adb', args, { timeout: 15_000, maxBuffer: 5_000_000, ...options });
+  }
+
   async status() {
-    let connection = 'offline';
     try {
-      await adb(['connect', device]);
-      const { stdout } = await adb(['devices', '-l']);
-      connection = stdout.includes(`${device} device`)
+      await this.execute(['connect', this.target]);
+      const { stdout } = await this.execute(['devices', '-l']);
+      const output = String(stdout);
+      const connection = output.includes(`${this.target} device`)
         ? 'device'
-        : stdout.includes('unauthorized')
+        : output.includes('unauthorized')
           ? 'unauthorized'
-          : stdout.includes('offline')
+          : output.includes('offline')
             ? 'offline'
             : 'unknown';
-      return { device, connection, details: stdout.trim() };
-    } catch (e) {
+      return { device: this.target, connection, details: output.trim() };
+    } catch (error) {
       return {
-        device,
+        device: this.target,
         connection: 'unreachable',
-        details: e instanceof Error ? e.message : String(e)
+        details: error instanceof Error ? error.message : String(error),
       };
     }
   }
 
   async key(key: RemoteKey) {
-    await adb(['-s', device, 'shell', 'input', 'keyevent', String(keys[key])]);
-    return { ok: true, key };
+    await this.execute(['-s', this.target, 'shell', 'input', 'keyevent', String(keyCodes[key])]);
   }
 
   async text(value: string) {
-    if (!/^[\p{L}\p{N} .,'!?@_-]{1,120}$/u.test(value)) {
-      throw new Error('Texto contém caracteres não permitidos');
-    }
-    await adb(['-s', device, 'shell', 'input', 'text', value.replaceAll(' ', '%s')]);
-    return { ok: true };
+    await this.execute(['-s', this.target, 'shell', 'input', 'text', value.replaceAll(' ', '%s')]);
+  }
+
+  async openApp(packageName: string) {
+    await this.execute(['-s', this.target, 'shell', 'monkey', '-p', packageName, '1']);
   }
 
   async foreground() {
-    const { stdout } = await adb(['-s', device, 'shell', 'dumpsys', 'activity', 'activities']);
-    const line = stdout.split('\n').find((x) => x.includes('mResumedActivity'))?.trim() ?? null;
-    return { foreground: line };
+    const { stdout } = await this.execute([
+      '-s', this.target, 'shell', 'dumpsys', 'activity', 'activities',
+    ]);
+    return {
+      foreground: String(stdout).split('\n').find((line) => line.includes('mResumedActivity'))?.trim() ?? null,
+    };
   }
 
   async screenshot() {
-    const { stdout } = await adb(['-s', device, 'exec-out', 'screencap', '-p'], null as never);
+    const { stdout } = await this.execute(
+      ['-s', this.target, 'exec-out', 'screencap', '-p'],
+      { encoding: null },
+    );
     return Buffer.from(stdout as unknown as Uint8Array);
   }
 }

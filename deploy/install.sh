@@ -8,22 +8,25 @@ chown -R remote-api:remote-api /opt/universal-remote-api /var/lib/universal-remo
 sudo -u remote-api env npm_config_cache=/tmp/remote-api-npm npm --prefix /opt/universal-remote-api ci
 sudo -u remote-api npm --prefix /opt/universal-remote-api run build
 sudo -u remote-api npm --prefix /opt/universal-remote-api prune --omit=dev
-admin_password="$(openssl rand -base64 18)"
-jwt_secret="$(openssl rand -hex 32)"
-cat > /etc/universal-remote-api.env <<EOF
+if [[ -f /etc/universal-remote-api.env ]]; then
+  echo "Preservando /etc/universal-remote-api.env existente"
+else
+  admin_password="$(openssl rand -base64 18)"
+  jwt_secret="$(openssl rand -hex 32)"
+  cat > /etc/universal-remote-api.env <<EOF
 PORT=3000
 HOST=127.0.0.1
 JWT_SECRET=$jwt_secret
 ADMIN_PASSWORD=$admin_password
-CORS_ORIGINS=http://localhost:4200
+CORS_ORIGINS=http://localhost:4200,https://app-btv.vercel.app
 DEVICE_HOST=btv-sogra
 ADB_PORT=5555
 DATABASE_PATH=/var/lib/universal-remote-api/app.db
 EOF
-chmod 600 /etc/universal-remote-api.env
-printf '%s\n' "$admin_password" > /home/ubuntu/INITIAL_ADMIN_PASSWORD
-chown ubuntu:ubuntu /home/ubuntu/INITIAL_ADMIN_PASSWORD
-chmod 600 /home/ubuntu/INITIAL_ADMIN_PASSWORD
+  printf '%s\n' "$admin_password" > /home/ubuntu/INITIAL_ADMIN_PASSWORD
+  chown ubuntu:ubuntu /home/ubuntu/INITIAL_ADMIN_PASSWORD
+  chmod 600 /home/ubuntu/INITIAL_ADMIN_PASSWORD
+fi
 cp /opt/universal-remote-api/deploy/universal-remote-api.service /etc/systemd/system/universal-remote-api.service
 systemctl daemon-reload
 systemctl enable --now universal-remote-api
