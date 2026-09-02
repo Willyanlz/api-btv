@@ -29,6 +29,7 @@ EOF
 fi
 cp /opt/universal-remote-api/deploy/universal-remote-api.service /etc/systemd/system/universal-remote-api.service
 systemctl daemon-reload
-systemctl enable --now universal-remote-api
+systemctl enable universal-remote-api
+systemctl restart universal-remote-api
 rm -f "$ARCHIVE"
 curl -fsS http://127.0.0.1:3000/health
