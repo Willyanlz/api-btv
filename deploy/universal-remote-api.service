@@ -1,0 +1,22 @@
+[Unit]
+Description=Universal Remote API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remote-api
+Group=remote-api
+WorkingDirectory=/opt/universal-remote-api
+EnvironmentFile=/etc/universal-remote-api.env
+ExecStart=/usr/bin/node /opt/universal-remote-api/dist/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/universal-remote-api
+
+[Install]
+WantedBy=multi-user.target
