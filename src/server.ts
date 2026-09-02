@@ -24,7 +24,7 @@ app.post('/api/auth/login', (q, r) => {
   if (!p.success || p.data.password !== config.ADMIN_PASSWORD) {
     return r.status(401).json({ error: 'INVALID_CREDENTIALS' });
   }
-  return r.json({ token: jwt.sign({ role: 'admin' }, config.JWT_SECRET, { expiresIn: '12h' }) });
+  return r.json({ token: jwt.sign({ role: 'admin' }, config.JWT_SECRET) });
 });
 
 app.use('/api', (q, r, n) => {
