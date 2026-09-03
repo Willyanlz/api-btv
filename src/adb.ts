@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { mkdtemp, rm, rmdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -18,6 +21,12 @@ export const keyCodes = {
 } as const;
 
 export type RemoteKey = keyof typeof keyCodes;
+
+export interface AppMetadata {
+  name: string | null;
+  icon: Buffer | null;
+  iconMimeType: "image/png" | "image/webp" | null;
+}
 
 export class AdbService {
   constructor(
@@ -166,6 +175,82 @@ export class AdbService {
       .sort();
   }
 
+  async extractAppMetadata(packageName: string): Promise<AppMetadata> {
+    await this.ensureConnected();
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "btv-app-"));
+    const apkPath = join(temporaryDirectory, "base.apk");
+
+    try {
+      const { stdout: pathOutput } = await this.execute([
+        "-s",
+        this.target,
+        "shell",
+        "pm",
+        "path",
+        packageName,
+      ]);
+      const remotePath = String(pathOutput)
+        .split("\n")
+        .map((line) => line.trim().replace(/^package:/, ""))
+        .find((path) => path.endsWith(".apk"));
+
+      if (!remotePath) {
+        throw new Error(`APP_APK_NOT_FOUND: ${packageName}`);
+      }
+
+      await this.execute(["-s", this.target, "pull", remotePath, apkPath], {
+        encoding: "utf8",
+        timeout: 60_000,
+        maxBuffer: 5_000_000,
+      });
+
+      const { stdout: badgingOutput } = await run(
+        "aapt",
+        ["dump", "badging", apkPath],
+        {
+          encoding: "utf8",
+          timeout: 30_000,
+          maxBuffer: 10_000_000,
+        },
+      );
+      const badging = String(badgingOutput);
+      const name =
+        badging.match(/^application-label:'([^']*)'/m)?.[1] ??
+        badging.match(/^application: label='([^']*)'/m)?.[1] ??
+        null;
+      const iconPath =
+        badging.match(/^application: .* icon='([^']+)'/m)?.[1] ?? null;
+      const supportedIcon =
+        iconPath && /\.(png|webp)$/i.test(iconPath) ? iconPath : null;
+
+      if (!supportedIcon) {
+        return { name, icon: null, iconMimeType: null };
+      }
+
+      const { stdout: iconOutput } = await run(
+        "unzip",
+        ["-p", apkPath, supportedIcon],
+        {
+          encoding: null,
+          timeout: 30_000,
+          maxBuffer: 10_000_000,
+        },
+      );
+      const extension = supportedIcon.toLowerCase().endsWith(".webp")
+        ? "image/webp"
+        : "image/png";
+
+      return {
+        name,
+        icon: Buffer.from(iconOutput as unknown as Uint8Array),
+        iconMimeType: extension,
+      };
+    } finally {
+      await rm(apkPath, { force: true });
+      await rmdir(temporaryDirectory).catch(() => undefined);
+    }
+  }
+
   async uninstallApp(packageName: string) {
     await this.ensureConnected();
     const { stdout } = await this.execute([
@@ -235,7 +320,9 @@ export class AdbService {
       const match = text.split("\n").find((line) => {
         const tokens = line.trim().split(/\s+/);
         return (
-          tokens[0] === hostIp || tokens[0] === hostShort || tokens[1] === hostShort
+          tokens[0] === hostIp ||
+          tokens[0] === hostShort ||
+          tokens[1] === hostShort
         );
       });
       if (!match) {

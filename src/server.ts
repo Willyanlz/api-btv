@@ -10,6 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AdbService, keyCodes, RemoteKey } from "./adb.js";
+import {
+  getCachedIcon,
+  removeCachedApp,
+  synchronizeAppCache,
+} from "./app-cache.js";
 import { config } from "./config.js";
 import { db, log } from "./db.js";
 
@@ -426,14 +431,10 @@ async function executeMacroSteps(
       await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
     if (step.type === "openApp") await adb.openApp(step.packageName);
     if (step.type === "callMacro") {
-      await executeMacroSteps(
-        deviceId,
-        step.macroId,
-        variables,
-        0,
-        undefined,
-        [...stack, macroId],
-      );
+      await executeMacroSteps(deviceId, step.macroId, variables, 0, undefined, [
+        ...stack,
+        macroId,
+      ]);
     }
     if (step.type === "text") {
       const text = step.value.replace(
@@ -611,41 +612,32 @@ app.get("/api/v1/devices/:id/apps", async (request, response, next) => {
   try {
     const adb = getDevice(request.params["id"]);
     if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
-    const packages = await adb.listUserApps();
-    const knownApps: Record<string, { name: string; icon: string; color: string }> = {
-      "com.global.unitviptv": { name: "UniTV", icon: "bi-tv", color: "#4f7cff" },
-      "com.netflix.ninja": { name: "Netflix", icon: "bi-badge-hd", color: "#e50914" },
-      "com.stremio.one": { name: "Stremio", icon: "bi-play-circle", color: "#7b5cff" },
-      "org.xbmc.kodi": { name: "Kodi", icon: "bi-diamond", color: "#17a7d6" },
-      "com.spotify.tv.android": { name: "Spotify", icon: "bi-spotify", color: "#1db954" },
-      "com.tailscale.ipn": { name: "Tailscale", icon: "bi-diagram-3", color: "#555b66" },
-      "com.limelight": { name: "Moonlight", icon: "bi-moon-stars", color: "#32a852" },
-      "tv.twitch.android.viewer": { name: "Twitch", icon: "bi-twitch", color: "#9146ff" },
-      "com.google.android.apps.youtube.tv": { name: "YouTube", icon: "bi-youtube", color: "#ff0000" },
-      "com.google.android.youtube": { name: "YouTube", icon: "bi-youtube", color: "#ff0000" },
-      "com.globo.globotv": { name: "Globoplay", icon: "bi-play-btn", color: "#d40000" },
-      "com.disney.disneyplus": { name: "Disney+", icon: "bi-stars", color: "#1f3d7d" },
-      "tv.pluto.android": { name: "Pluto TV", icon: "bi-broadcast", color: "#f29100" },
-      "com.plexapp.android": { name: "Plex", icon: "bi-collection-play", color: "#e5a00d" },
-      "org.videolan.vlc": { name: "VLC", icon: "bi-play-btn", color: "#ff6d00" },
-      "com.crunchyroll.crunchyroid": { name: "Crunchyroll", icon: "bi-film", color: "#f47521" },
-      "com.hbo.hbomax": { name: "HBO Max", icon: "bi-badge-hd", color: "#46008c" },
-      "com.paramount.plus": { name: "Paramount+", icon: "bi-play-circle", color: "#0f46b4" },
-      "com.apple.atve.amp.tv": { name: "Apple TV", icon: "bi-apple", color: "#a1a1a6" },
-      "com.mxtech.videoplayer.ad": { name: "MX Player", icon: "bi-collection-play", color: "#10af62" },
-    };
-    response.json(
-      packages.map((packageName) => ({
-        packageName,
-        name: knownApps[packageName]?.name ?? packageName.split(".").at(-1),
-        icon: knownApps[packageName]?.icon ?? "bi-app",
-        color: knownApps[packageName]?.color ?? "#34465f",
-      })),
-    );
+    response.json(await synchronizeAppCache(request.params["id"], adb));
   } catch (error) {
     next(error);
   }
 });
+
+app.get(
+  "/api/v1/devices/:id/apps/:packageName/icon",
+  (request, response, next) => {
+    try {
+      const packageName = packageNameSchema.parse(
+        request.params["packageName"],
+      );
+      const icon = getCachedIcon(request.params["id"], packageName);
+      if (!icon?.icon_blob || !icon.icon_mime_type) {
+        return response.status(404).json({ error: "APP_ICON_NOT_FOUND" });
+      }
+      response
+        .setHeader("Content-Type", icon.icon_mime_type)
+        .setHeader("Cache-Control", "private, max-age=86400");
+      response.send(icon.icon_blob);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.post(
   "/api/v1/devices/:id/apps/:packageName/open",
@@ -674,6 +666,7 @@ app.delete(
         request.params["packageName"],
       );
       await adb.uninstallApp(packageName);
+      removeCachedApp(request.params["id"], packageName);
       response.status(204).send();
     } catch (error) {
       next(error);
@@ -801,10 +794,14 @@ app.use(
         message: "Já existe uma macro em execução neste dispositivo.",
       });
     }
-    if (message === "MACRO_CYCLE_DETECTED" || message === "MACRO_NESTING_LIMIT") {
+    if (
+      message === "MACRO_CYCLE_DETECTED" ||
+      message === "MACRO_NESTING_LIMIT"
+    ) {
       return response.status(400).json({
         error: message,
-        message: "A composição de macros possui uma referência circular ou profunda demais.",
+        message:
+          "A composição de macros possui uma referência circular ou profunda demais.",
       });
     }
     response.status(400).json({ error: "REQUEST_FAILED", message });

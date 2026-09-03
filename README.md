@@ -14,6 +14,10 @@ API Node.js/TypeScript com SQLite e driver ADB restrito a operações permitidas
 - Screenshot remoto em `GET /api/v1/devices/:id/screenshot` sem cache.
 - Diagnóstico conjunto da rota Tailscale, disponibilidade do aparelho e autorização ADB.
 - Listagem de apps de usuário com `pm list packages -3`.
+- Nome e ícone real extraídos do APK e armazenados no SQLite por dispositivo.
+- APK usado na extração é temporário e removido imediatamente após o processamento.
+- O cache só processa pacotes novos; entradas de aplicativos desinstalados são removidas automaticamente.
+- Ícones PNG/WebP são servidos por rota autenticada; ícones adaptativos ou incompatíveis usam fallback visual.
 - Exclusão adicional de pacotes `com.amazon.*` e `amazon.*`.
 - Abertura com `monkey`, desinstalação com `adb uninstall` e instalação de APK com `adb install -r`.
 - APK temporário excluído da VPS após a tentativa de instalação.
