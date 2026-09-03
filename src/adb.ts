@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
@@ -29,45 +29,56 @@ export class AdbService {
     return `${this.host}:${this.port}`;
   }
 
-  private execute(args: string[], options: Record<string, unknown> = { encoding: 'utf8' }) {
-    return run('adb', args, { timeout: 15_000, maxBuffer: 5_000_000, ...options });
+  private execute(
+    args: string[],
+    options: Record<string, unknown> = { encoding: "utf8" },
+  ) {
+    return run("adb", args, {
+      timeout: 15_000,
+      maxBuffer: 5_000_000,
+      ...options,
+    });
   }
 
   private async ensureConnected() {
     try {
-      await this.execute(['connect', this.target]);
+      await this.execute(["connect", this.target]);
     } catch {
       // O estado detalhado abaixo produz uma mensagem mais útil que o stderr do connect.
     }
-    const { stdout } = await this.execute(['devices', '-l']);
+    const { stdout } = await this.execute(["devices", "-l"]);
     const line = String(stdout)
-      .split('\n')
+      .split("\n")
       .find((item) => item.startsWith(this.target));
-    if (line?.includes('unauthorized')) {
-      throw new Error('ADB_UNAUTHORIZED: confirme "Sempre permitir deste computador" na TV Box.');
+    if (line?.includes("unauthorized")) {
+      throw new Error(
+        'ADB_UNAUTHORIZED: confirme "Sempre permitir deste computador" na TV Box.',
+      );
     }
-    if (!line || !line.includes('device')) {
-      throw new Error(`ADB_OFFLINE: não foi possível conectar a ${this.target}.`);
+    if (!line || !line.includes("device")) {
+      throw new Error(
+        `ADB_OFFLINE: não foi possível conectar a ${this.target}.`,
+      );
     }
   }
 
   async status() {
     try {
-      await this.execute(['connect', this.target]);
-      const { stdout } = await this.execute(['devices', '-l']);
+      await this.execute(["connect", this.target]);
+      const { stdout } = await this.execute(["devices", "-l"]);
       const output = String(stdout);
       const connection = output.includes(`${this.target} device`)
-        ? 'device'
-        : output.includes('unauthorized')
-          ? 'unauthorized'
-          : output.includes('offline')
-            ? 'offline'
-            : 'unknown';
+        ? "device"
+        : output.includes("unauthorized")
+          ? "unauthorized"
+          : output.includes("offline")
+            ? "offline"
+            : "unknown";
       return { device: this.target, connection, details: output.trim() };
     } catch (error) {
       return {
         device: this.target,
-        connection: 'unreachable',
+        connection: "unreachable",
         details: error instanceof Error ? error.message : String(error),
       };
     }
@@ -75,33 +86,116 @@ export class AdbService {
 
   async key(key: RemoteKey) {
     await this.ensureConnected();
-    await this.execute(['-s', this.target, 'shell', 'input', 'keyevent', String(keyCodes[key])]);
+    await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "input",
+      "keyevent",
+      String(keyCodes[key]),
+    ]);
   }
 
   async text(value: string) {
     await this.ensureConnected();
-    await this.execute(['-s', this.target, 'shell', 'input', 'text', value.replaceAll(' ', '%s')]);
+    await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "input",
+      "text",
+      value.replaceAll(" ", "%s"),
+    ]);
   }
 
   async openApp(packageName: string) {
     await this.ensureConnected();
-    await this.execute(['-s', this.target, 'shell', 'monkey', '-p', packageName, '1']);
+    await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "monkey",
+      "-p",
+      packageName,
+      "1",
+    ]);
+  }
+
+  async listUserApps() {
+    await this.ensureConnected();
+    const { stdout } = await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "pm",
+      "list",
+      "packages",
+      "-3",
+    ]);
+    return String(stdout)
+      .split("\n")
+      .map((line) => line.trim().replace(/^package:/, ""))
+      .filter(
+        (name) =>
+          Boolean(name) &&
+          !name.startsWith("com.amazon.") &&
+          !name.startsWith("amazon."),
+      )
+      .sort();
+  }
+
+  async uninstallApp(packageName: string) {
+    await this.ensureConnected();
+    const { stdout } = await this.execute([
+      "-s",
+      this.target,
+      "uninstall",
+      packageName,
+    ]);
+    if (!String(stdout).includes("Success")) {
+      throw new Error(`APP_UNINSTALL_FAILED: ${String(stdout).trim()}`);
+    }
+  }
+
+  async installApp(apkPath: string) {
+    await this.ensureConnected();
+    const { stdout } = await run(
+      "adb",
+      ["-s", this.target, "install", "-r", apkPath],
+      {
+        timeout: 180_000,
+        maxBuffer: 5_000_000,
+        encoding: "utf8",
+      },
+    );
+    if (!String(stdout).includes("Success")) {
+      throw new Error(`APP_INSTALL_FAILED: ${String(stdout).trim()}`);
+    }
   }
 
   async foreground() {
     await this.ensureConnected();
     const { stdout } = await this.execute([
-      '-s', this.target, 'shell', 'dumpsys', 'activity', 'activities',
+      "-s",
+      this.target,
+      "shell",
+      "dumpsys",
+      "activity",
+      "activities",
     ]);
     return {
-      foreground: String(stdout).split('\n').find((line) => line.includes('mResumedActivity'))?.trim() ?? null,
+      foreground:
+        String(stdout)
+          .split("\n")
+          .find((line) => line.includes("mResumedActivity"))
+          ?.trim() ?? null,
     };
   }
 
   async screenshot() {
     await this.ensureConnected();
     const { stdout } = await this.execute(
-      ['-s', this.target, 'exec-out', 'screencap', '-p'],
+      ["-s", this.target, "exec-out", "screencap", "-p"],
       { encoding: null },
     );
     return Buffer.from(stdout as unknown as Uint8Array);

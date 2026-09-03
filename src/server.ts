@@ -5,6 +5,9 @@ import helmet from "helmet";
 import jwt from "jsonwebtoken";
 import pinoHttp from "pino-http";
 import { z } from "zod";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { AdbService, keyCodes, RemoteKey } from "./adb.js";
 import { config } from "./config.js";
@@ -57,12 +60,6 @@ const schemas = {
     port: z.number().int().min(1).max(65535).default(5555),
     enabled,
   }),
-  apps: z.object({
-    id,
-    name: z.string().min(1),
-    packageName: z.string().min(1),
-    enabled,
-  }),
   macros: z.object({
     id,
     name: z.string().min(1),
@@ -74,21 +71,6 @@ const schemas = {
       .string()
       .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/)
       .default("texto"),
-    enabled,
-  }),
-  intents: z.object({
-    id,
-    name: z.string().min(1),
-    macroId: id,
-    phrases: z.array(z.string().min(1)).min(1),
-    enabled,
-  }),
-  automations: z.object({
-    id,
-    name: z.string().min(1),
-    deviceId: id,
-    macroId: id,
-    schedule: z.string().min(1),
     enabled,
   }),
   commands: z.object({
@@ -205,6 +187,12 @@ const authLimiter = rateLimit({
 
 app.use(helmet());
 app.use(cors({ origin: allowedOrigins.includes("*") ? true : allowedOrigins }));
+app.use(
+  express.raw({
+    type: "application/vnd.android.package-archive",
+    limit: "300mb",
+  }),
+);
 app.use(express.json({ limit: "50kb" }));
 app.use(pinoHttp());
 
@@ -267,18 +255,10 @@ app.get("/api/v1/actions", (_request, response) =>
   ]),
 );
 type Resource = keyof typeof schemas;
-const resources: Resource[] = [
-  "devices",
-  "apps",
-  "macros",
-  "intents",
-  "automations",
-  "commands",
-];
+const resources: Resource[] = ["devices", "macros", "commands"];
 
 const columns: Record<Resource, Record<string, string>> = {
   devices: { name: "name", host: "host", port: "port", enabled: "enabled" },
-  apps: { name: "name", packageName: "package_name", enabled: "enabled" },
   macros: {
     name: "name",
     description: "description",
@@ -286,19 +266,6 @@ const columns: Record<Resource, Record<string, string>> = {
     requiresInput: "requires_input",
     inputLabel: "input_label",
     inputVariable: "input_variable",
-    enabled: "enabled",
-  },
-  intents: {
-    name: "name",
-    macroId: "macro_id",
-    phrases: "phrases_json",
-    enabled: "enabled",
-  },
-  automations: {
-    name: "name",
-    deviceId: "device_id",
-    macroId: "macro_id",
-    schedule: "schedule",
     enabled: "enabled",
   },
   commands: {
@@ -494,6 +461,78 @@ app.post("/api/v1/devices/:id/text", async (request, response, next) => {
     next(error);
   }
 });
+
+const packageNameSchema = z
+  .string()
+  .regex(/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$/);
+
+app.get("/api/v1/devices/:id/apps", async (request, response, next) => {
+  try {
+    const adb = getDevice(request.params["id"]);
+    if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+    const packages = await adb.listUserApps();
+    response.json(packages.map((packageName) => ({ packageName })));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post(
+  "/api/v1/devices/:id/apps/:packageName/open",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const packageName = packageNameSchema.parse(
+        request.params["packageName"],
+      );
+      await adb.openApp(packageName);
+      response.json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.delete(
+  "/api/v1/devices/:id/apps/:packageName",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const packageName = packageNameSchema.parse(
+        request.params["packageName"],
+      );
+      await adb.uninstallApp(packageName);
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/v1/devices/:id/apps/install",
+  async (request, response, next) => {
+    let directory = "";
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      if (!Buffer.isBuffer(request.body) || request.body.length < 4) {
+        return response.status(400).json({ error: "INVALID_APK" });
+      }
+      directory = await mkdtemp(join(tmpdir(), "btv-apk-"));
+      const apkPath = join(directory, "upload.apk");
+      await writeFile(apkPath, request.body);
+      await adb.installApp(apkPath);
+      response.status(201).json({ ok: true });
+    } catch (error) {
+      next(error);
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 app.post("/api/v1/commands/:commandId/run", async (request, response, next) => {
   try {
