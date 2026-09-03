@@ -10,7 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { AdbService, keyCodes, RemoteKey } from "./adb.js";
+import {
+  AdbService,
+  FocusDirection,
+  keyCodes,
+  RemoteKey,
+} from "./adb.js";
 import {
   getCachedIcon,
   removeCachedApp,
@@ -62,6 +67,10 @@ const atomicStepSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("clickButton"),
+    buttonId: z.string().min(1).max(80),
+  }),
+  z.object({
+    type: z.literal("focusButton"),
     buttonId: z.string().min(1).max(80),
   }),
   z.object({
@@ -157,7 +166,7 @@ const schemas = {
             });
           }
         }
-        if (step.type === "clickButton") {
+        if (step.type === "clickButton" || step.type === "focusButton") {
           const button = db
             .prepare(
               `SELECT s.package_name FROM app_buttons b
@@ -371,7 +380,7 @@ app.get("/api/v1/actions", (_request, response) =>
     { type: "callMacro", label: "Chamar outra macro" },
     { type: "screenCondition", label: "Verificar tela" },
     { type: "clickButton", label: "Clicar em botão" },
-    { type: "clickFocused", label: "Clicar no foco" },
+    { type: "focusButton", label: "Focar em botão" },
   ]),
 );
 app.get("/api/v1/screens", (request, response) => {
@@ -527,6 +536,118 @@ class MacroStepError extends Error {
   }
 }
 
+type FocusEdge = { direction: FocusDirection; to: string };
+
+function getCachedFocusRoute(
+  screenId: string,
+  fromNode: string,
+  toNode: string,
+): FocusEdge[] {
+  const rows = db
+    .prepare(
+      `SELECT from_node, direction, to_node FROM focus_routes
+       WHERE screen_id = ?`,
+    )
+    .all(screenId) as { from_node: string; direction: string; to_node: string }[];
+  const edges = new Map<string, FocusEdge[]>();
+  for (const row of rows) {
+    if (!edges.has(row.from_node)) edges.set(row.from_node, []);
+    edges.get(row.from_node)!.push({
+      direction: row.direction as FocusDirection,
+      to: row.to_node,
+    });
+  }
+  const queue: { node: string; path: FocusEdge[] }[] = [
+    { node: fromNode, path: [] },
+  ];
+  const visited = new Set([fromNode]);
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current.node === toNode) return current.path;
+    for (const edge of edges.get(current.node) ?? []) {
+      if (!visited.has(edge.to)) {
+        visited.add(edge.to);
+        queue.push({ node: edge.to, path: [...current.path, edge] });
+      }
+    }
+  }
+  return [];
+}
+
+function recordFocusEdge(
+  screenId: string,
+  from: string,
+  direction: string,
+  to: string,
+) {
+  db.prepare(
+    `INSERT INTO focus_routes (screen_id, from_node, direction, to_node, hit_count)
+     VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT(screen_id, from_node, direction)
+     DO UPDATE SET to_node = excluded.to_node,
+                   hit_count = hit_count + 1,
+                   last_used_at = CURRENT_TIMESTAMP`,
+  ).run(screenId, from, direction, to);
+}
+
+async function focusWithRoutes(
+  adb: AdbService,
+  screenId: string,
+  selector: { resourceId?: string; contentDesc?: string; text?: string },
+  friendlyName: string,
+): Promise<void> {
+  let nodes = await adb.uiDump();
+  const target = adb.findNode(nodes, selector);
+  if (!target) {
+    throw new Error(
+      `FOCUS_TARGET_MISSING: "${friendlyName}" não está visível nesta tela.`,
+    );
+  }
+  let focused = nodes.find((node) => node.focused);
+  if (focused && adb.matchesSelector(focused, selector)) return;
+
+  let stepsUsed = 0;
+  const maxSteps = 24;
+
+  if (focused) {
+    const fromNode = adb.nodeIdentity(focused);
+    const toNode = adb.nodeIdentity(target);
+    const route = getCachedFocusRoute(screenId, fromNode, toNode);
+    if (route.length) {
+      let diverged = false;
+      for (const edge of route) {
+        await adb.pressDirection(edge.direction);
+        nodes = await adb.uiDump();
+        stepsUsed += 1;
+        const after = nodes.find((node) => node.focused);
+        if (!after) {
+          diverged = true;
+          break;
+        }
+        if (adb.nodeIdentity(after) !== edge.to) {
+          recordFocusEdge(screenId, fromNode, edge.direction, adb.nodeIdentity(after));
+          diverged = true;
+          break;
+        }
+        if (adb.matchesSelector(after, selector)) return;
+      }
+      if (!diverged) return;
+    }
+  }
+
+  const result = await adb.focusTarget({
+    selector,
+    maxSteps: Math.max(1, maxSteps - stepsUsed),
+    onEdge: (from, direction, to) =>
+      recordFocusEdge(screenId, from, direction, to),
+  });
+  if (!result.reached) {
+    throw new Error(
+      `FOCUS_NOT_REACHED: não consegui posicionar o foco em "${friendlyName}".`,
+    );
+  }
+}
+
 async function executeMacroSteps(
   deviceId: string,
   macroId: string,
@@ -649,6 +770,53 @@ async function executeMacroSteps(
         );
       }
       await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    if (step.type === "focusButton") {
+      const button = db
+        .prepare("SELECT * FROM app_buttons WHERE id = ?")
+        .get(step.buttonId) as
+        | {
+            id: string;
+            screen_id: string;
+            friendly_name: string;
+            resource_id: string;
+            text: string;
+            content_desc: string;
+            class_name: string;
+            center_x: number;
+            center_y: number;
+            bounds: string;
+          }
+        | undefined;
+      if (!button) throw new Error("BUTTON_NOT_FOUND");
+      const foreground = await adb.foreground();
+      const screen = db
+        .prepare(
+          `SELECT id, package_name FROM app_screens WHERE id = ?`,
+        )
+        .get(button.screen_id) as
+        | { id: string; package_name: string }
+        | undefined;
+      const expectedPackage = screen?.package_name;
+      if (
+        expectedPackage &&
+        foreground.packageName &&
+        foreground.packageName !== expectedPackage
+      ) {
+        throw new Error(
+          `FOCUS_WRONG_APP: o app aberto não é o esperado para "${button.friendly_name}"`,
+        );
+      }
+      await focusWithRoutes(
+        adb,
+        button.screen_id,
+        {
+          resourceId: button.resource_id || undefined,
+          contentDesc: button.content_desc || undefined,
+          text: button.text || undefined,
+        },
+        button.friendly_name,
+      );
     }
   };
 

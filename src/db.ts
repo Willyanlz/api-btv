@@ -86,6 +86,16 @@ db.exec(`
     UNIQUE(screen_id, friendly_name),
     FOREIGN KEY (screen_id) REFERENCES app_screens(id) ON DELETE CASCADE
   );
+  CREATE TABLE IF NOT EXISTS focus_routes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    screen_id TEXT NOT NULL,
+    from_node TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    to_node TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(screen_id, from_node, direction)
+  );
 `);
 
 function addColumnIfMissing(table: string, column: string, definition: string) {

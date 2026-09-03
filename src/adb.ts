@@ -22,6 +22,8 @@ export const keyCodes = {
 
 export type RemoteKey = keyof typeof keyCodes;
 
+export type FocusDirection = "UP" | "DOWN" | "LEFT" | "RIGHT";
+
 export interface AppMetadata {
   name: string | null;
   icon: Buffer | null;
@@ -517,6 +519,104 @@ export class AdbService {
   /** Clica no elemento focado (DPAD_CENTER). */
   async clickFocused() {
     await this.key("ENTER");
+  }
+
+  /** Identidade estável de um nó (para o grafo de rotas de foco). */
+  nodeIdentity(node: UiNode): string {
+    if (node.resourceId) return `id:${node.resourceId}`;
+    if (node.text) return `t:${node.text}`;
+    if (node.contentDesc) return `d:${node.contentDesc}`;
+    return `c:${node.className}:${node.centerX},${node.centerY}`;
+  }
+
+  /** Verdadeiro se o nó casa com o seletor (mesma prioridade do findNode). */
+  matchesSelector(
+    node: UiNode,
+    selector: { resourceId?: string; contentDesc?: string; text?: string },
+  ): boolean {
+    if (selector.resourceId && node.resourceId === selector.resourceId)
+      return true;
+    if (selector.contentDesc && node.contentDesc === selector.contentDesc)
+      return true;
+    if (selector.text && node.text === selector.text) return true;
+    return false;
+  }
+
+  /** Pressiona uma seta de navegação de foco. */
+  async pressDirection(direction: FocusDirection) {
+    const map: Record<FocusDirection, RemoteKey> = {
+      UP: "DPAD_UP",
+      DOWN: "DPAD_DOWN",
+      LEFT: "DPAD_LEFT",
+      RIGHT: "DPAD_RIGHT",
+    };
+    await this.key(map[direction]);
+  }
+
+  /**
+   * Navega com D-pad até o foco aterrissar no elemento alvo (não clica).
+   * Usa heurística geométrica por passo e re-dump a cada tecla; registra as
+   * transições observadas via onEdge para aprendizado de rotas.
+   */
+  async focusTarget(opts: {
+    selector: { resourceId?: string; contentDesc?: string; text?: string };
+    maxSteps?: number;
+    onEdge?: (from: string, direction: FocusDirection, to: string) => void;
+  }): Promise<{ reached: boolean; stepsUsed: number }> {
+    const maxSteps = opts.maxSteps ?? 16;
+    let nodes = await this.uiDump();
+    let focused = nodes.find((node) => node.focused);
+    if (focused && this.matchesSelector(focused, opts.selector)) {
+      return { reached: true, stepsUsed: 0 };
+    }
+    let steps = 0;
+    while (steps < maxSteps) {
+      const target = this.findNode(nodes, opts.selector);
+      if (!target) break;
+      focused = nodes.find((node) => node.focused);
+      if (!focused) break;
+      const from = this.nodeIdentity(focused);
+      const dx = target.centerX - focused.centerX;
+      const dy = target.centerY - focused.centerY;
+      const primary: FocusDirection =
+        Math.abs(dx) > Math.abs(dy)
+          ? dx > 0
+            ? "RIGHT"
+            : "LEFT"
+          : dy > 0
+            ? "DOWN"
+            : "UP";
+      await this.pressDirection(primary);
+      nodes = await this.uiDump();
+      steps += 1;
+      const after = nodes.find((node) => node.focused);
+      if (after) opts.onEdge?.(from, primary, this.nodeIdentity(after));
+      if (after && this.matchesSelector(after, opts.selector)) {
+        return { reached: true, stepsUsed: steps };
+      }
+      // Se o foco não se moveu, tenta o eixo secundário antes de desistir.
+      if (after && this.nodeIdentity(after) === from) {
+        const secondary: FocusDirection =
+          Math.abs(dx) > Math.abs(dy)
+            ? dy > 0
+              ? "DOWN"
+              : "UP"
+            : dx > 0
+              ? "RIGHT"
+              : "LEFT";
+        await this.pressDirection(secondary);
+        nodes = await this.uiDump();
+        steps += 1;
+        const afterAlt = nodes.find((node) => node.focused);
+        if (afterAlt)
+          opts.onEdge?.(from, secondary, this.nodeIdentity(afterAlt));
+        if (afterAlt && this.matchesSelector(afterAlt, opts.selector)) {
+          return { reached: true, stepsUsed: steps };
+        }
+        if (afterAlt && this.nodeIdentity(afterAlt) === from) break;
+      }
+    }
+    return { reached: false, stepsUsed: steps };
   }
 
   async tailscaleStatus(): Promise<{ ok: boolean; detail: string }> {
