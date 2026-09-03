@@ -7,7 +7,7 @@ API Node.js/TypeScript com SQLite e driver ADB restrito a operações permitidas
 - Autenticação JWT sem expiração automática.
 - CRUD de dispositivos, macros e comandos permitidos.
 - Execução sequencial de macros com variáveis.
-- Aplicativo esperado opcional por macro, com verificação do app em primeiro plano e espera de 3 segundos após abri-lo.
+- Aplicativo esperado opcional por macro, com verificação do app em primeiro plano e espera configurável de 0 a 60 segundos (10 segundos por padrão) após abri-lo.
 - Erros de macro informam o número exato do passo, a macro e a causa original.
 - Bloqueio de execuções simultâneas por dispositivo.
 - Composição de macros com proteção contra referências circulares.

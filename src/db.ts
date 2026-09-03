@@ -80,6 +80,11 @@ addColumnIfMissing(
 addColumnIfMissing("macros", "input_variable", "TEXT NOT NULL DEFAULT 'texto'");
 addColumnIfMissing("macros", "app_package", "TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing(
+  "macros",
+  "app_open_delay_seconds",
+  "INTEGER NOT NULL DEFAULT 10",
+);
+addColumnIfMissing(
   "device_app_cache",
   "extraction_status",
   "TEXT NOT NULL DEFAULT 'complete'",

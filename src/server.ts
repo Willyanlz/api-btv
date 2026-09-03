@@ -81,6 +81,7 @@ const schemas = {
       .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/)
       .default("texto"),
     appPackage: z.string().max(200).default(""),
+    appOpenDelaySeconds: z.number().int().min(0).max(60).default(10),
     enabled,
   }),
   commands: z.object({
@@ -288,6 +289,7 @@ const columns: Record<Resource, Record<string, string>> = {
     inputLabel: "input_label",
     inputVariable: "input_variable",
     appPackage: "app_package",
+    appOpenDelaySeconds: "app_open_delay_seconds",
     enabled: "enabled",
   },
   commands: {
@@ -479,6 +481,7 @@ function getMacroRequiredApp(deviceId: string, macroId: string) {
   return db
     .prepare(
       `SELECT macros.app_package AS package_name,
+              macros.app_open_delay_seconds AS delay_seconds,
               COALESCE(device_app_cache.name, macros.app_package) AS name
        FROM macros
        LEFT JOIN device_app_cache
@@ -487,8 +490,7 @@ function getMacroRequiredApp(deviceId: string, macroId: string) {
        WHERE macros.id = ?`,
     )
     .get(deviceId, macroId) as
-    | { package_name: string; name: string }
-    | undefined;
+    { package_name: string; name: string; delay_seconds: number } | undefined;
 }
 
 app.get(
@@ -510,6 +512,7 @@ app.get(
         requiredApp: {
           packageName: requiredApp.package_name,
           name: requiredApp.name,
+          delaySeconds: requiredApp.delay_seconds,
         },
         foregroundPackage: foreground.packageName,
       });
@@ -549,7 +552,9 @@ app.post(
             const adb = getDevice(request.params["deviceId"]);
             if (!adb) throw new Error("DEVICE_NOT_FOUND");
             await adb.openApp(requiredApp.package_name);
-            await new Promise((resolve) => setTimeout(resolve, 3_000));
+            await new Promise((resolve) =>
+              setTimeout(resolve, requiredApp.delay_seconds * 1_000),
+            );
           }
           return executeMacroSteps(
             request.params["deviceId"],
@@ -819,8 +824,7 @@ app.post("/api/v1/commands/:commandId/run", async (request, response, next) => {
         "SELECT id, label, keys_json FROM commands WHERE id=? AND enabled=1",
       )
       .get(request.params["commandId"]) as
-      | { id: string; label: string; keys_json: string }
-      | undefined;
+      { id: string; label: string; keys_json: string } | undefined;
     if (!command)
       return response.status(404).json({ error: "COMMAND_NOT_FOUND" });
 
