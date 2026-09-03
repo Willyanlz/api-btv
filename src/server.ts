@@ -8,6 +8,7 @@ import { z } from "zod";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { AdbService, keyCodes, RemoteKey } from "./adb.js";
 import {
@@ -66,20 +67,18 @@ const stepSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("screenCondition"),
     screenId: z.string().min(1).max(80),
+    operator: z.enum(["is", "isNot"]).default("is"),
     whenTrue: z.array(atomicStepSchema).max(30),
     whenFalse: z.array(atomicStepSchema).max(30),
   }),
 ]);
 
-const knownScreens = [
-  {
-    id: "unitv-search",
-    label: "Tela de busca",
-    appName: "UniTV",
-    packageName: "com.global.unitviptv",
-    activityName: "com.vod.ui.activity.VodSearchActivity",
-  },
-] as const;
+type AppScreenRow = {
+  id: string;
+  package_name: string;
+  friendly_name: string;
+  activity_name: string;
+};
 
 const schemas = {
   devices: z.object({
@@ -89,21 +88,41 @@ const schemas = {
     port: z.number().int().min(1).max(65535).default(5555),
     enabled,
   }),
-  macros: z.object({
-    id,
-    name: z.string().min(1),
-    description: z.string().default(""),
-    steps: z.array(stepSchema).min(1),
-    requiresInput: z.boolean().default(false),
-    inputLabel: z.string().min(1).max(100).default("O que deseja buscar?"),
-    inputVariable: z
-      .string()
-      .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/)
-      .default("texto"),
-    appPackage: z.string().max(200).default(""),
-    appOpenDelaySeconds: z.number().int().min(0).max(60).default(10),
-    enabled,
-  }),
+  macros: z
+    .object({
+      id,
+      name: z.string().min(1),
+      description: z.string().default(""),
+      steps: z.array(stepSchema).min(1),
+      requiresInput: z.boolean().default(false),
+      inputLabel: z.string().min(1).max(100).default("O que deseja buscar?"),
+      inputVariable: z
+        .string()
+        .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/)
+        .default("texto"),
+      appPackage: z.string().max(200).default(""),
+      appOpenDelaySeconds: z.number().int().min(0).max(60).default(10),
+      enabled,
+    })
+    .superRefine((value, context) => {
+      for (const [index, step] of value.steps.entries()) {
+        if (step.type !== "screenCondition") continue;
+        const screen = db
+          .prepare("SELECT package_name FROM app_screens WHERE id = ?")
+          .get(step.screenId) as { package_name: string } | undefined;
+        if (
+          !screen ||
+          !value.appPackage ||
+          screen.package_name !== value.appPackage
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["steps", index, "screenId"],
+            message: "A tela escolhida não pertence ao aplicativo esperado.",
+          });
+        }
+      }
+    }),
   commands: z.object({
     id,
     label: z.string().min(1).max(80),
@@ -297,11 +316,18 @@ app.get("/api/v1/actions", (_request, response) =>
     { type: "screenCondition", label: "Verificar tela" },
   ]),
 );
-app.get("/api/v1/screens", (_request, response) =>
-  response.json(
-    knownScreens.map(({ id, label, appName }) => ({ id, label, appName })),
-  ),
-);
+app.get("/api/v1/screens", (request, response) => {
+  const packageName = String(request.query["packageName"] ?? "");
+  const rows = db
+    .prepare(
+      `SELECT id, package_name, friendly_name, activity_name
+       FROM app_screens
+       WHERE package_name = ?
+       ORDER BY friendly_name`,
+    )
+    .all(packageName) as AppScreenRow[];
+  response.json(rows.map((row) => ({ id: row.id, name: row.friendly_name })));
+});
 type Resource = keyof typeof schemas;
 const resources: Resource[] = ["devices", "macros", "commands"];
 
@@ -487,14 +513,21 @@ async function executeMacroSteps(
       await adb.text(text);
     }
     if (step.type === "screenCondition") {
-      const screen = knownScreens.find((item) => item.id === step.screenId);
+      const screen = db
+        .prepare(
+          `SELECT id, package_name, friendly_name, activity_name
+           FROM app_screens WHERE id = ?`,
+        )
+        .get(step.screenId) as AppScreenRow | undefined;
       if (!screen) throw new Error("UNKNOWN_SCREEN");
       const foreground = await adb.foreground();
-      const matches =
-        foreground.packageName === screen.packageName &&
-        foreground.activityName === screen.activityName;
-      const branch = matches ? step.whenTrue : step.whenFalse;
-      const branchLabel = matches ? "Se sim" : "Se não";
+      const isCurrentScreen =
+        foreground.packageName === screen.package_name &&
+        foreground.activityName === screen.activity_name;
+      const conditionResult =
+        step.operator === "isNot" ? !isCurrentScreen : isCurrentScreen;
+      const branch = conditionResult ? step.whenTrue : step.whenFalse;
+      const branchLabel = conditionResult ? "Se sim" : "Se não";
       for (const [branchIndex, branchStep] of branch.entries()) {
         try {
           await executeStep(branchStep);
@@ -775,6 +808,177 @@ app.post("/api/v1/devices/:id/text", async (request, response, next) => {
 const packageNameSchema = z
   .string()
   .regex(/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$/);
+const activityNameSchema = z
+  .string()
+  .regex(/^[a-zA-Z][a-zA-Z0-9_.$]*(\.[a-zA-Z0-9_.$]+)+$/)
+  .max(240);
+const appScreenInputSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  activityName: activityNameSchema,
+});
+
+function serializeAppScreen(row: AppScreenRow) {
+  return {
+    id: row.id,
+    packageName: row.package_name,
+    name: row.friendly_name,
+    activityName: row.activity_name,
+  };
+}
+
+app.get("/api/v1/apps/:packageName/screens", (request, response, next) => {
+  try {
+    const packageName = packageNameSchema.parse(request.params["packageName"]);
+    const rows = db
+      .prepare(
+        `SELECT id, package_name, friendly_name, activity_name
+         FROM app_screens WHERE package_name = ? ORDER BY friendly_name`,
+      )
+      .all(packageName) as AppScreenRow[];
+    response.json(rows.map(serializeAppScreen));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1/apps/:packageName/screens", (request, response, next) => {
+  try {
+    const packageName = packageNameSchema.parse(request.params["packageName"]);
+    const value = appScreenInputSchema.parse(request.body);
+    const row: AppScreenRow = {
+      id: randomUUID(),
+      package_name: packageName,
+      friendly_name: value.name,
+      activity_name: value.activityName,
+    };
+    db.prepare(
+      `INSERT INTO app_screens
+        (id, package_name, friendly_name, activity_name)
+       VALUES (?, ?, ?, ?)`,
+    ).run(row.id, row.package_name, row.friendly_name, row.activity_name);
+    response.status(201).json(serializeAppScreen(row));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/v1/app-screens/:id", (request, response, next) => {
+  try {
+    const value = appScreenInputSchema.parse(request.body);
+    const result = db
+      .prepare(
+        `UPDATE app_screens SET friendly_name = ?, activity_name = ?,
+          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      )
+      .run(value.name, value.activityName, request.params["id"]);
+    if (!result.changes)
+      return response.status(404).json({ error: "SCREEN_NOT_FOUND" });
+    response.json({ id: request.params["id"], ...value });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/v1/app-screens/:id", (request, response, next) => {
+  try {
+    const used = (
+      db.prepare("SELECT steps_json FROM macros").all() as {
+        steps_json: string;
+      }[]
+    ).some((row) =>
+      row.steps_json.includes(`\"screenId\":\"${request.params["id"]}\"`),
+    );
+    if (used) {
+      return response.status(409).json({
+        error: "SCREEN_IN_USE",
+        message:
+          "Esta tela está sendo usada por uma macro e não pode ser excluída.",
+      });
+    }
+    const result = db
+      .prepare("DELETE FROM app_screens WHERE id = ?")
+      .run(request.params["id"]);
+    result.changes
+      ? response.status(204).send()
+      : response.status(404).json({ error: "SCREEN_NOT_FOUND" });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get(
+  "/api/v1/devices/:id/current-screen",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const foreground = await adb.foreground();
+      const cached = foreground.packageName
+        ? (db
+            .prepare(
+              `SELECT name FROM device_app_cache
+               WHERE device_id = ? AND package_name = ?`,
+            )
+            .get(request.params["id"], foreground.packageName) as
+            { name: string } | undefined)
+        : undefined;
+      const screen =
+        foreground.packageName && foreground.activityName
+          ? (db
+              .prepare(
+                `SELECT id, package_name, friendly_name, activity_name
+                 FROM app_screens
+                 WHERE package_name = ? AND activity_name = ?`,
+              )
+              .get(foreground.packageName, foreground.activityName) as
+              AppScreenRow | undefined)
+          : undefined;
+      response.json({
+        packageName: foreground.packageName,
+        appName: cached?.name ?? foreground.packageName,
+        activityName: foreground.activityName,
+        screen: screen ? serializeAppScreen(screen) : null,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/v1/devices/:id/apps/:packageName/screens/capture",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const packageName = packageNameSchema.parse(
+        request.params["packageName"],
+      );
+      const name = z.string().trim().min(2).max(80).parse(request.body?.name);
+      const foreground = await adb.foreground();
+      if (foreground.packageName !== packageName || !foreground.activityName) {
+        return response.status(409).json({
+          error: "APP_NOT_IN_FOREGROUND",
+          message: "Abra este aplicativo na tela que deseja cadastrar.",
+        });
+      }
+      const row: AppScreenRow = {
+        id: randomUUID(),
+        package_name: packageName,
+        friendly_name: name,
+        activity_name: activityNameSchema.parse(foreground.activityName),
+      };
+      db.prepare(
+        `INSERT INTO app_screens
+          (id, package_name, friendly_name, activity_name)
+         VALUES (?, ?, ?, ?)`,
+      ).run(row.id, row.package_name, row.friendly_name, row.activity_name);
+      response.status(201).json(serializeAppScreen(row));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.get("/api/v1/devices/:id/apps", async (request, response, next) => {
   try {
@@ -959,6 +1163,12 @@ app.use(
       return response.status(409).json({
         error: "DEVICE_BUSY",
         message: "Já existe uma macro em execução neste dispositivo.",
+      });
+    }
+    if (message.includes("UNIQUE constraint failed: app_screens")) {
+      return response.status(409).json({
+        error: "SCREEN_ALREADY_EXISTS",
+        message: "Já existe uma tela com este nome ou código neste aplicativo.",
       });
     }
     if (error instanceof MacroStepError) {

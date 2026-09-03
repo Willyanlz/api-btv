@@ -60,6 +60,16 @@ db.exec(`
     keys_json TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1
   );
+  CREATE TABLE IF NOT EXISTS app_screens (
+    id TEXT PRIMARY KEY,
+    package_name TEXT NOT NULL,
+    friendly_name TEXT NOT NULL,
+    activity_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(package_name, friendly_name),
+    UNIQUE(package_name, activity_name)
+  );
 `);
 
 function addColumnIfMissing(table: string, column: string, definition: string) {
@@ -76,6 +86,17 @@ addColumnIfMissing(
   "macros",
   "input_label",
   "TEXT NOT NULL DEFAULT 'O que deseja buscar?'",
+);
+
+db.prepare(
+  `INSERT OR IGNORE INTO app_screens
+    (id, package_name, friendly_name, activity_name)
+   VALUES (?, ?, ?, ?)`,
+).run(
+  "unitv-search",
+  "com.global.unitviptv",
+  "Tela de busca",
+  "com.vod.ui.activity.VodSearchActivity",
 );
 addColumnIfMissing("macros", "input_variable", "TEXT NOT NULL DEFAULT 'texto'");
 addColumnIfMissing("macros", "app_package", "TEXT NOT NULL DEFAULT ''");

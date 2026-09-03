@@ -304,9 +304,12 @@ export class AdbService {
     const packageName = foreground?.match(
       /\s([a-zA-Z][a-zA-Z0-9_.]+)\/[a-zA-Z0-9_.$]+/,
     )?.[1];
-    const activityName = foreground?.match(
+    const rawActivityName = foreground?.match(
       /\s[a-zA-Z][a-zA-Z0-9_.]+\/([a-zA-Z0-9_.$]+)/,
     )?.[1];
+    const activityName = rawActivityName?.startsWith(".")
+      ? `${packageName}${rawActivityName}`
+      : rawActivityName;
     return {
       foreground,
       packageName: packageName ?? null,
