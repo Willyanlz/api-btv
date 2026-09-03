@@ -50,6 +50,10 @@ const stepSchema = z.discriminatedUnion("type", [
     type: z.literal("openApp"),
     packageName: z.string().min(1).max(200),
   }),
+  z.object({
+    type: z.literal("callMacro"),
+    macroId: id,
+  }),
 ]);
 
 const schemas = {
@@ -185,7 +189,17 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        // blob: é usado pelos screenshots carregados no <img> do controle remoto.
+        "img-src": ["'self'", "data:", "blob:"],
+      },
+    },
+  }),
+);
 app.use(cors({ origin: allowedOrigins.includes("*") ? true : allowedOrigins }));
 app.use(
   express.raw({
@@ -252,6 +266,7 @@ app.get("/api/v1/actions", (_request, response) =>
     { type: "text", label: "Digitar texto" },
     { type: "wait", label: "Aguardar" },
     { type: "openApp", label: "Abrir aplicativo" },
+    { type: "callMacro", label: "Chamar outra macro" },
   ]),
 );
 type Resource = keyof typeof schemas;
@@ -381,13 +396,20 @@ function normalizeText(value: string) {
     .trim();
 }
 
-async function executeMacro(
+const busyDevices = new Set<string>();
+
+async function executeMacroSteps(
   deviceId: string,
   macroId: string,
   variables: Record<string, string> = {},
+  from = 0,
+  to?: number,
+  stack: string[] = [],
 ) {
   const adb = getDevice(deviceId);
   if (!adb) throw new Error("DEVICE_NOT_FOUND");
+  if (stack.includes(macroId)) throw new Error("MACRO_CYCLE_DETECTED");
+  if (stack.length >= 10) throw new Error("MACRO_NESTING_LIMIT");
 
   const row = db
     .prepare("SELECT steps_json FROM macros WHERE id=? AND enabled=1")
@@ -395,11 +417,24 @@ async function executeMacro(
   if (!row) throw new Error("MACRO_NOT_FOUND");
 
   const steps = z.array(stepSchema).parse(JSON.parse(row.steps_json));
-  for (const step of steps) {
+  const last = Math.min(to ?? steps.length - 1, steps.length - 1);
+  let executed = 0;
+  for (let index = Math.max(0, from); index <= last; index += 1) {
+    const step = steps[index];
     if (step.type === "key") await adb.key(step.key);
     if (step.type === "wait")
       await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
     if (step.type === "openApp") await adb.openApp(step.packageName);
+    if (step.type === "callMacro") {
+      await executeMacroSteps(
+        deviceId,
+        step.macroId,
+        variables,
+        0,
+        undefined,
+        [...stack, macroId],
+      );
+    }
     if (step.type === "text") {
       const text = step.value.replace(
         /\{\{(\w+)\}\}/g,
@@ -407,9 +442,20 @@ async function executeMacro(
       );
       await adb.text(text);
     }
+    executed += 1;
   }
   log(`macro:${macroId}`, "success", deviceId);
-  return { ok: true, steps: steps.length };
+  return { ok: true, steps: executed };
+}
+
+async function runLocked<T>(deviceId: string, operation: () => Promise<T>) {
+  if (busyDevices.has(deviceId)) throw new Error("DEVICE_BUSY");
+  busyDevices.add(deviceId);
+  try {
+    return await operation();
+  } finally {
+    busyDevices.delete(deviceId);
+  }
 }
 
 app.post(
@@ -417,10 +463,43 @@ app.post(
   async (request, response, next) => {
     try {
       response.json(
-        await executeMacro(
-          request.params["deviceId"],
-          request.params["macroId"],
-          request.body?.variables,
+        await runLocked(request.params["deviceId"], () =>
+          executeMacroSteps(
+            request.params["deviceId"],
+            request.params["macroId"],
+            request.body?.variables,
+          ),
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/v1/devices/:deviceId/macros/:macroId/test",
+  async (request, response, next) => {
+    try {
+      const range = z
+        .object({
+          from: z.number().int().min(0),
+          to: z.number().int().min(0),
+          variables: z.record(z.string()).default({}),
+        })
+        .parse(request.body);
+      if (range.to < range.from) {
+        return response.status(400).json({ error: "INVALID_STEP_RANGE" });
+      }
+      response.json(
+        await runLocked(request.params["deviceId"], () =>
+          executeMacroSteps(
+            request.params["deviceId"],
+            request.params["macroId"],
+            range.variables,
+            range.from,
+            range.to,
+          ),
         ),
       );
     } catch (error) {
@@ -434,6 +513,68 @@ app.get("/api/v1/devices/:id/status", async (request, response) => {
   adb
     ? response.json(await adb.status())
     : response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+});
+
+app.get("/api/v1/devices/:id/screenshot", async (request, response, next) => {
+  try {
+    const adb = getDevice(request.params["id"]);
+    if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+    const screenshot = await adb.screenshot();
+    log("screenshot", "success", request.params["id"]);
+    response
+      .setHeader("Content-Type", "image/png")
+      .setHeader("Cache-Control", "no-store");
+    response.send(screenshot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1/devices/:id/diagnose", async (request, response, next) => {
+  try {
+    const adb = getDevice(request.params["id"]);
+    if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+    const tailscale = await adb.tailscaleStatus();
+    const adbStatus = await adb.status();
+    const reachable =
+      adbStatus.connection !== "unreachable" &&
+      adbStatus.connection !== "unknown";
+    const checks = [
+      {
+        id: "tailscale",
+        label: "Rede (Tailscale)",
+        ok: tailscale.ok,
+        detail: tailscale.detail,
+      },
+      {
+        id: "online",
+        label: "Aparelho online",
+        ok: reachable,
+        detail: reachable
+          ? "Respondendo na rede"
+          : "Inacessível — pode estar desligado ou sem energia",
+      },
+      {
+        id: "adb",
+        label: "ADB autorizado",
+        ok: adbStatus.connection === "device",
+        detail:
+          adbStatus.connection === "device"
+            ? "Pronto para receber comandos"
+            : adbStatus.connection === "unauthorized"
+              ? 'Confirme "Sempre permitir" na tela da TV'
+              : adbStatus.details.slice(0, 140),
+      },
+    ];
+    response.json({
+      device: adbStatus.device,
+      online: checks.every((check) => check.ok),
+      checks,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/v1/devices/:id/key", async (request, response, next) => {
@@ -471,7 +612,36 @@ app.get("/api/v1/devices/:id/apps", async (request, response, next) => {
     const adb = getDevice(request.params["id"]);
     if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
     const packages = await adb.listUserApps();
-    response.json(packages.map((packageName) => ({ packageName })));
+    const knownApps: Record<string, { name: string; icon: string; color: string }> = {
+      "com.global.unitviptv": { name: "UniTV", icon: "bi-tv", color: "#4f7cff" },
+      "com.netflix.ninja": { name: "Netflix", icon: "bi-badge-hd", color: "#e50914" },
+      "com.stremio.one": { name: "Stremio", icon: "bi-play-circle", color: "#7b5cff" },
+      "org.xbmc.kodi": { name: "Kodi", icon: "bi-diamond", color: "#17a7d6" },
+      "com.spotify.tv.android": { name: "Spotify", icon: "bi-spotify", color: "#1db954" },
+      "com.tailscale.ipn": { name: "Tailscale", icon: "bi-diagram-3", color: "#555b66" },
+      "com.limelight": { name: "Moonlight", icon: "bi-moon-stars", color: "#32a852" },
+      "tv.twitch.android.viewer": { name: "Twitch", icon: "bi-twitch", color: "#9146ff" },
+      "com.google.android.apps.youtube.tv": { name: "YouTube", icon: "bi-youtube", color: "#ff0000" },
+      "com.google.android.youtube": { name: "YouTube", icon: "bi-youtube", color: "#ff0000" },
+      "com.globo.globotv": { name: "Globoplay", icon: "bi-play-btn", color: "#d40000" },
+      "com.disney.disneyplus": { name: "Disney+", icon: "bi-stars", color: "#1f3d7d" },
+      "tv.pluto.android": { name: "Pluto TV", icon: "bi-broadcast", color: "#f29100" },
+      "com.plexapp.android": { name: "Plex", icon: "bi-collection-play", color: "#e5a00d" },
+      "org.videolan.vlc": { name: "VLC", icon: "bi-play-btn", color: "#ff6d00" },
+      "com.crunchyroll.crunchyroid": { name: "Crunchyroll", icon: "bi-film", color: "#f47521" },
+      "com.hbo.hbomax": { name: "HBO Max", icon: "bi-badge-hd", color: "#46008c" },
+      "com.paramount.plus": { name: "Paramount+", icon: "bi-play-circle", color: "#0f46b4" },
+      "com.apple.atve.amp.tv": { name: "Apple TV", icon: "bi-apple", color: "#a1a1a6" },
+      "com.mxtech.videoplayer.ad": { name: "MX Player", icon: "bi-collection-play", color: "#10af62" },
+    };
+    response.json(
+      packages.map((packageName) => ({
+        packageName,
+        name: knownApps[packageName]?.name ?? packageName.split(".").at(-1),
+        icon: knownApps[packageName]?.icon ?? "bi-app",
+        color: knownApps[packageName]?.color ?? "#34465f",
+      })),
+    );
   } catch (error) {
     next(error);
   }
@@ -624,6 +794,18 @@ app.use(
     }
     if (message.startsWith("ADB_OFFLINE")) {
       return response.status(503).json({ error: "ADB_OFFLINE", message });
+    }
+    if (message === "DEVICE_BUSY") {
+      return response.status(409).json({
+        error: "DEVICE_BUSY",
+        message: "Já existe uma macro em execução neste dispositivo.",
+      });
+    }
+    if (message === "MACRO_CYCLE_DETECTED" || message === "MACRO_NESTING_LIMIT") {
+      return response.status(400).json({
+        error: message,
+        message: "A composição de macros possui uma referência circular ou profunda demais.",
+      });
     }
     response.status(400).json({ error: "REQUEST_FAILED", message });
   },

@@ -67,7 +67,8 @@ export class AdbService {
       await this.execute(["connect", this.target]);
       const { stdout } = await this.execute(["devices", "-l"]);
       const output = String(stdout);
-      const connection = output.includes(`${this.target} device`)
+      const normalized = output.replace(/\s+/g, " ");
+      const connection = normalized.includes(`${this.target} device`)
         ? "device"
         : output.includes("unauthorized")
           ? "unauthorized"
@@ -220,5 +221,38 @@ export class AdbService {
       { encoding: null },
     );
     return Buffer.from(stdout as unknown as Uint8Array);
+  }
+
+  async tailscaleStatus(): Promise<{ ok: boolean; detail: string }> {
+    try {
+      const { stdout } = await run("tailscale", ["status"], {
+        timeout: 8_000,
+        encoding: "utf8",
+      });
+      const text = String(stdout);
+      const hostShort = this.host.split(".")[0];
+      const hostIp = this.host;
+      const match = text.split("\n").find((line) => {
+        const tokens = line.trim().split(/\s+/);
+        return (
+          tokens[0] === hostIp || tokens[0] === hostShort || tokens[1] === hostShort
+        );
+      });
+      if (!match) {
+        return {
+          ok: false,
+          detail: "Aparelho não encontrado na rede Tailscale",
+        };
+      }
+      const active = match.includes("active");
+      return {
+        ok: active,
+        detail: active
+          ? "Conectado via tailnet"
+          : "Aparelho offline na rede Tailscale",
+      };
+    } catch {
+      return { ok: false, detail: "Não foi possível verificar o Tailscale" };
+    }
   }
 }
