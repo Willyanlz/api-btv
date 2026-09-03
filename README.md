@@ -17,4 +17,6 @@ A API executa internamente em `127.0.0.1:3000`, passa pelo Nginx na porta 80 e �
 3. Monte macros com `GET /api/v1/actions`; o cliente nunca envia ADB arbitrário.
 4. Execute uma macro com `POST /api/v1/devices/:deviceId/macros/:macroId/run`.
 
+Macros podem definir `requiresInput`, `inputLabel` e `inputVariable`. O frontend coleta o valor antes da execução e envia em `variables`; o motor substitui expressões como `{{texto}}` nos passos de digitação.
+
 Os recursos `devices`, `apps`, `macros`, `intents` e `automations` possuem operações de listagem, criação, atualização e exclusão em `/api/v1`. Uma instalação nova retorna listas vazias; nenhum dado demonstrativo é inserido.
