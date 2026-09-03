@@ -9,3 +9,12 @@ O token da primeira versão não expira automaticamente, atendendo ao uso domés
 ## Produção atual
 
 A API executa internamente em `127.0.0.1:3000`, passa pelo Nginx na porta 80 e é publicada com TLS pelo Cloudflare Tunnel em `https://box.labswill.com`.
+
+## Fluxo de uso
+
+1. Cadastre um dispositivo com o IP ou hostname do Tailscale e a porta ADB.
+2. Cadastre aplicativos usando o nome real do pacote Android.
+3. Monte macros com `GET /api/v1/actions`; o cliente nunca envia ADB arbitrário.
+4. Execute uma macro com `POST /api/v1/devices/:deviceId/macros/:macroId/run`.
+
+Os recursos `devices`, `apps`, `macros`, `intents` e `automations` possuem operações de listagem, criação, atualização e exclusão em `/api/v1`. Uma instalação nova retorna listas vazias; nenhum dado demonstrativo é inserido.

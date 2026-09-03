@@ -12,7 +12,20 @@ import { db, log } from './db.js';
 
 const app = express();
 
-const id = z.string().regex(/^[a-z0-9][a-z0-9_-]{1,63}$/);
+const id = z.string().min(2).max(100).transform((value, context) => {
+  const normalized = value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  if (normalized.length < 2 || normalized.length > 63) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Use um identificador entre 2 e 63 caracteres.' });
+    return z.NEVER;
+  }
+  return normalized;
+});
 const enabled = z.boolean().default(true);
 const keyEnum = z.enum(Object.keys(keyCodes) as [RemoteKey, ...RemoteKey[]]);
 
@@ -126,7 +139,7 @@ app.post('/api/v1/auth/login', authLimiter, (request, response) => {
     return response.status(401).json({ error: 'INVALID_CREDENTIALS' });
   }
   return response.json({
-    token: jwt.sign({ role: 'admin' }, config.JWT_SECRET, { expiresIn: '12h' }),
+    token: jwt.sign({ role: 'admin' }, config.JWT_SECRET),
   });
 });
 
