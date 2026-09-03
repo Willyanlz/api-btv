@@ -12,6 +12,7 @@ API Node.js/TypeScript com SQLite e driver ADB restrito a operações permitidas
 - Bloqueio de execuções simultâneas por dispositivo.
 - Composição de macros com proteção contra referências circulares.
 - Teste de um passo ou de um intervalo de passos da macro.
+- Condição por tela conhecida com caminhos independentes; o catálogo começa pela **Tela de busca** do UniTV.
 - Reconexão ADB antes de cada operação.
 - Screenshot remoto em `GET /api/v1/devices/:id/screenshot` sem cache.
 - Conexões ADB já autorizadas são reutilizadas para acelerar screenshots e comandos.

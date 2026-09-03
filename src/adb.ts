@@ -304,7 +304,14 @@ export class AdbService {
     const packageName = foreground?.match(
       /\s([a-zA-Z][a-zA-Z0-9_.]+)\/[a-zA-Z0-9_.$]+/,
     )?.[1];
-    return { foreground, packageName: packageName ?? null };
+    const activityName = foreground?.match(
+      /\s[a-zA-Z][a-zA-Z0-9_.]+\/([a-zA-Z0-9_.$]+)/,
+    )?.[1];
+    return {
+      foreground,
+      packageName: packageName ?? null,
+      activityName: activityName ?? null,
+    };
   }
 
   async tailscaleAlwaysOnStatus() {

@@ -44,7 +44,7 @@ const id = z
 const enabled = z.boolean().default(true);
 const keyEnum = z.enum(Object.keys(keyCodes) as [RemoteKey, ...RemoteKey[]]);
 
-const stepSchema = z.discriminatedUnion("type", [
+const atomicStepSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("key"), key: keyEnum }),
   z.object({ type: z.literal("text"), value: z.string().min(1).max(120) }),
   z.object({
@@ -60,6 +60,26 @@ const stepSchema = z.discriminatedUnion("type", [
     macroId: id,
   }),
 ]);
+
+const stepSchema = z.discriminatedUnion("type", [
+  ...atomicStepSchema.options,
+  z.object({
+    type: z.literal("screenCondition"),
+    screenId: z.string().min(1).max(80),
+    whenTrue: z.array(atomicStepSchema).max(30),
+    whenFalse: z.array(atomicStepSchema).max(30),
+  }),
+]);
+
+const knownScreens = [
+  {
+    id: "unitv-search",
+    label: "Tela de busca",
+    appName: "UniTV",
+    packageName: "com.global.unitviptv",
+    activityName: "com.vod.ui.activity.VodSearchActivity",
+  },
+] as const;
 
 const schemas = {
   devices: z.object({
@@ -274,7 +294,13 @@ app.get("/api/v1/actions", (_request, response) =>
     { type: "wait", label: "Aguardar" },
     { type: "openApp", label: "Abrir aplicativo" },
     { type: "callMacro", label: "Chamar outra macro" },
+    { type: "screenCondition", label: "Verificar tela" },
   ]),
+);
+app.get("/api/v1/screens", (_request, response) =>
+  response.json(
+    knownScreens.map(({ id, label, appName }) => ({ id, label, appName })),
+  ),
 );
 type Resource = keyof typeof schemas;
 const resources: Resource[] = ["devices", "macros", "commands"];
@@ -438,31 +464,53 @@ async function executeMacroSteps(
   const steps = z.array(stepSchema).parse(JSON.parse(row.steps_json));
   const last = Math.min(to ?? steps.length - 1, steps.length - 1);
   let executed = 0;
+
+  const executeStep = async (
+    step: z.infer<typeof stepSchema> | z.infer<typeof atomicStepSchema>,
+  ): Promise<void> => {
+    if (step.type === "key") await adb.key(step.key);
+    if (step.type === "wait") {
+      await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
+    }
+    if (step.type === "openApp") await adb.openApp(step.packageName);
+    if (step.type === "callMacro") {
+      await executeMacroSteps(deviceId, step.macroId, variables, 0, undefined, [
+        ...stack,
+        macroId,
+      ]);
+    }
+    if (step.type === "text") {
+      const text = step.value.replace(
+        /\{\{(\w+)\}\}/g,
+        (_match, key: string) => variables[key] ?? "",
+      );
+      await adb.text(text);
+    }
+    if (step.type === "screenCondition") {
+      const screen = knownScreens.find((item) => item.id === step.screenId);
+      if (!screen) throw new Error("UNKNOWN_SCREEN");
+      const foreground = await adb.foreground();
+      const matches =
+        foreground.packageName === screen.packageName &&
+        foreground.activityName === screen.activityName;
+      const branch = matches ? step.whenTrue : step.whenFalse;
+      const branchLabel = matches ? "Se sim" : "Se não";
+      for (const [branchIndex, branchStep] of branch.entries()) {
+        try {
+          await executeStep(branchStep);
+        } catch (error) {
+          if (error instanceof MacroStepError) throw error;
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new Error(`${branchLabel}, ação ${branchIndex + 1}: ${cause}`);
+        }
+      }
+    }
+  };
+
   for (let index = Math.max(0, from); index <= last; index += 1) {
     const step = steps[index];
     try {
-      if (step.type === "key") await adb.key(step.key);
-      if (step.type === "wait") {
-        await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
-      }
-      if (step.type === "openApp") await adb.openApp(step.packageName);
-      if (step.type === "callMacro") {
-        await executeMacroSteps(
-          deviceId,
-          step.macroId,
-          variables,
-          0,
-          undefined,
-          [...stack, macroId],
-        );
-      }
-      if (step.type === "text") {
-        const text = step.value.replace(
-          /\{\{(\w+)\}\}/g,
-          (_match, key: string) => variables[key] ?? "",
-        );
-        await adb.text(text);
-      }
+      await executeStep(step);
     } catch (error) {
       if (error instanceof MacroStepError) throw error;
       throw new MacroStepError(
