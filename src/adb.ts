@@ -50,15 +50,21 @@ export class AdbService {
   }
 
   private async ensureConnected() {
-    try {
-      await this.execute(["connect", this.target]);
-    } catch {
-      // O estado detalhado abaixo produz uma mensagem mais útil que o stderr do connect.
-    }
-    const { stdout } = await this.execute(["devices", "-l"]);
-    const line = String(stdout)
+    let { stdout } = await this.execute(["devices", "-l"]);
+    let line = String(stdout)
       .split("\n")
       .find((item) => item.startsWith(this.target));
+    if (!line?.includes("device")) {
+      try {
+        await this.execute(["connect", this.target]);
+      } catch {
+        // O estado detalhado abaixo produz uma mensagem mais útil que o stderr do connect.
+      }
+      ({ stdout } = await this.execute(["devices", "-l"]));
+      line = String(stdout)
+        .split("\n")
+        .find((item) => item.startsWith(this.target));
+    }
     if (line?.includes("unauthorized")) {
       throw new Error(
         'ADB_UNAUTHORIZED: confirme "Sempre permitir deste computador" na TV Box.',
@@ -290,13 +296,100 @@ export class AdbService {
       "activity",
       "activities",
     ]);
+    const foreground =
+      String(stdout)
+        .split("\n")
+        .find((line) => line.includes("mResumedActivity"))
+        ?.trim() ?? null;
+    const packageName = foreground?.match(
+      /\s([a-zA-Z][a-zA-Z0-9_.]+)\/[a-zA-Z0-9_.$]+/,
+    )?.[1];
+    return { foreground, packageName: packageName ?? null };
+  }
+
+  async tailscaleAlwaysOnStatus() {
+    await this.ensureConnected();
+    const application = await this.getSecureSetting("always_on_vpn_app");
+    const lockdown = await this.getSecureSetting("always_on_vpn_lockdown");
     return {
-      foreground:
-        String(stdout)
-          .split("\n")
-          .find((line) => line.includes("mResumedActivity"))
-          ?.trim() ?? null,
+      enabled: application === "com.tailscale.ipn",
+      application,
+      lockdown: lockdown === "1",
     };
+  }
+
+  async setTailscaleAlwaysOn(enabled: boolean) {
+    await this.ensureConnected();
+    if (enabled) {
+      const { stdout } = await this.execute([
+        "-s",
+        this.target,
+        "shell",
+        "pm",
+        "path",
+        "com.tailscale.ipn",
+      ]);
+      if (!String(stdout).includes("package:")) {
+        throw new Error("TAILSCALE_NOT_INSTALLED");
+      }
+    }
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        if (enabled) {
+          await this.putSecureSetting("always_on_vpn_app", "com.tailscale.ipn");
+        } else {
+          await this.execute([
+            "-s",
+            this.target,
+            "shell",
+            "settings",
+            "delete",
+            "secure",
+            "always_on_vpn_app",
+          ]);
+        }
+        await this.putSecureSetting("always_on_vpn_lockdown", "0");
+        const status = await this.tailscaleAlwaysOnStatus();
+        if (status.enabled === enabled && !status.lockdown) return status;
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    throw new Error(
+      `TAILSCALE_ALWAYS_ON_VERIFICATION_FAILED: ${
+        lastError instanceof Error ? lastError.message : "estado não confirmado"
+      }`,
+    );
+  }
+
+  private async getSecureSetting(name: string) {
+    const { stdout } = await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "settings",
+      "get",
+      "secure",
+      name,
+    ]);
+    const value = String(stdout).trim();
+    return value && value !== "null" ? value : null;
+  }
+
+  private async putSecureSetting(name: string, value: string) {
+    await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "settings",
+      "put",
+      "secure",
+      name,
+      value,
+    ]);
   }
 
   async screenshot() {

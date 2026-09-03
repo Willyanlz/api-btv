@@ -80,6 +80,7 @@ const schemas = {
       .string()
       .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/)
       .default("texto"),
+    appPackage: z.string().max(200).default(""),
     enabled,
   }),
   commands: z.object({
@@ -286,6 +287,7 @@ const columns: Record<Resource, Record<string, string>> = {
     requiresInput: "requires_input",
     inputLabel: "input_label",
     inputVariable: "input_variable",
+    appPackage: "app_package",
     enabled: "enabled",
   },
   commands: {
@@ -403,6 +405,16 @@ function normalizeText(value: string) {
 
 const busyDevices = new Set<string>();
 
+class MacroStepError extends Error {
+  constructor(
+    readonly macroId: string,
+    readonly stepIndex: number,
+    readonly causeMessage: string,
+  ) {
+    super(`MACRO_STEP_FAILED:${macroId}:${stepIndex + 1}:${causeMessage}`);
+  }
+}
+
 async function executeMacroSteps(
   deviceId: string,
   macroId: string,
@@ -426,28 +438,86 @@ async function executeMacroSteps(
   let executed = 0;
   for (let index = Math.max(0, from); index <= last; index += 1) {
     const step = steps[index];
-    if (step.type === "key") await adb.key(step.key);
-    if (step.type === "wait")
-      await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
-    if (step.type === "openApp") await adb.openApp(step.packageName);
-    if (step.type === "callMacro") {
-      await executeMacroSteps(deviceId, step.macroId, variables, 0, undefined, [
-        ...stack,
+    try {
+      if (step.type === "key") await adb.key(step.key);
+      if (step.type === "wait") {
+        await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
+      }
+      if (step.type === "openApp") await adb.openApp(step.packageName);
+      if (step.type === "callMacro") {
+        await executeMacroSteps(
+          deviceId,
+          step.macroId,
+          variables,
+          0,
+          undefined,
+          [...stack, macroId],
+        );
+      }
+      if (step.type === "text") {
+        const text = step.value.replace(
+          /\{\{(\w+)\}\}/g,
+          (_match, key: string) => variables[key] ?? "",
+        );
+        await adb.text(text);
+      }
+    } catch (error) {
+      if (error instanceof MacroStepError) throw error;
+      throw new MacroStepError(
         macroId,
-      ]);
-    }
-    if (step.type === "text") {
-      const text = step.value.replace(
-        /\{\{(\w+)\}\}/g,
-        (_match, key: string) => variables[key] ?? "",
+        index,
+        error instanceof Error ? error.message : String(error),
       );
-      await adb.text(text);
     }
     executed += 1;
   }
   log(`macro:${macroId}`, "success", deviceId);
   return { ok: true, steps: executed };
 }
+
+function getMacroRequiredApp(deviceId: string, macroId: string) {
+  return db
+    .prepare(
+      `SELECT macros.app_package AS package_name,
+              COALESCE(device_app_cache.name, macros.app_package) AS name
+       FROM macros
+       LEFT JOIN device_app_cache
+         ON device_app_cache.package_name = macros.app_package
+        AND device_app_cache.device_id = ?
+       WHERE macros.id = ?`,
+    )
+    .get(deviceId, macroId) as
+    | { package_name: string; name: string }
+    | undefined;
+}
+
+app.get(
+  "/api/v1/devices/:deviceId/macros/:macroId/preflight",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["deviceId"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const requiredApp = getMacroRequiredApp(
+        request.params["deviceId"],
+        request.params["macroId"],
+      );
+      if (!requiredApp?.package_name) {
+        return response.json({ ready: true, requiredApp: null });
+      }
+      const foreground = await adb.foreground();
+      response.json({
+        ready: foreground.packageName === requiredApp.package_name,
+        requiredApp: {
+          packageName: requiredApp.package_name,
+          name: requiredApp.name,
+        },
+        foregroundPackage: foreground.packageName,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 async function runLocked<T>(deviceId: string, operation: () => Promise<T>) {
   if (busyDevices.has(deviceId)) throw new Error("DEVICE_BUSY");
@@ -463,14 +533,30 @@ app.post(
   "/api/v1/devices/:deviceId/macros/:macroId/run",
   async (request, response, next) => {
     try {
+      const options = z
+        .object({
+          variables: z.record(z.string()).default({}),
+          openRequiredApp: z.boolean().default(false),
+        })
+        .parse(request.body ?? {});
       response.json(
-        await runLocked(request.params["deviceId"], () =>
-          executeMacroSteps(
+        await runLocked(request.params["deviceId"], async () => {
+          const requiredApp = getMacroRequiredApp(
             request.params["deviceId"],
             request.params["macroId"],
-            request.body?.variables,
-          ),
-        ),
+          );
+          if (options.openRequiredApp && requiredApp?.package_name) {
+            const adb = getDevice(request.params["deviceId"]);
+            if (!adb) throw new Error("DEVICE_NOT_FOUND");
+            await adb.openApp(requiredApp.package_name);
+            await new Promise((resolve) => setTimeout(resolve, 800));
+          }
+          return executeMacroSteps(
+            request.params["deviceId"],
+            request.params["macroId"],
+            options.variables,
+          );
+        }),
       );
     } catch (error) {
       next(error);
@@ -577,6 +663,35 @@ app.post("/api/v1/devices/:id/diagnose", async (request, response, next) => {
     next(error);
   }
 });
+
+app.get(
+  "/api/v1/devices/:id/settings/tailscale-always-on",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      response.json(await adb.tailscaleAlwaysOnStatus());
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.put(
+  "/api/v1/devices/:id/settings/tailscale-always-on",
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const { enabled } = z
+        .object({ enabled: z.boolean() })
+        .parse(request.body);
+      response.json(await adb.setTailscaleAlwaysOn(enabled));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.post("/api/v1/devices/:id/key", async (request, response, next) => {
   try {
@@ -792,6 +907,29 @@ app.use(
       return response.status(409).json({
         error: "DEVICE_BUSY",
         message: "Já existe uma macro em execução neste dispositivo.",
+      });
+    }
+    if (error instanceof MacroStepError) {
+      return response.status(400).json({
+        error: "MACRO_STEP_FAILED",
+        message: `A macro falhou no passo ${error.stepIndex + 1}.`,
+        macroId: error.macroId,
+        stepIndex: error.stepIndex,
+        stepNumber: error.stepIndex + 1,
+        cause: error.causeMessage,
+      });
+    }
+    if (message === "TAILSCALE_NOT_INSTALLED") {
+      return response.status(400).json({
+        error: message,
+        message: "O aplicativo Tailscale não está instalado neste aparelho.",
+      });
+    }
+    if (message.startsWith("TAILSCALE_ALWAYS_ON_VERIFICATION_FAILED")) {
+      return response.status(409).json({
+        error: message,
+        message:
+          "O aparelho não confirmou a configuração. Este Android pode bloquear a alteração via ADB.",
       });
     }
     if (

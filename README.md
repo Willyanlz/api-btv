@@ -7,12 +7,16 @@ API Node.js/TypeScript com SQLite e driver ADB restrito a operações permitidas
 - Autenticação JWT sem expiração automática.
 - CRUD de dispositivos, macros e comandos permitidos.
 - Execução sequencial de macros com variáveis.
+- Aplicativo esperado opcional por macro, com verificação do app em primeiro plano.
+- Erros de macro informam o número exato do passo, a macro e a causa original.
 - Bloqueio de execuções simultâneas por dispositivo.
 - Composição de macros com proteção contra referências circulares.
 - Teste de um passo ou de um intervalo de passos da macro.
 - Reconexão ADB antes de cada operação.
 - Screenshot remoto em `GET /api/v1/devices/:id/screenshot` sem cache.
+- Conexões ADB já autorizadas são reutilizadas para acelerar screenshots e comandos.
 - Diagnóstico conjunto da rota Tailscale, disponibilidade do aparelho e autorização ADB.
+- Consulta, ativação e desativação verificadas do Tailscale como VPN sempre ativa.
 - Listagem de apps de usuário com `pm list packages -3`.
 - Nome e ícone real extraídos do APK e armazenados no SQLite por dispositivo.
 - APK usado na extração é temporário e removido imediatamente após o processamento.

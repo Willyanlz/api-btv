@@ -78,6 +78,7 @@ addColumnIfMissing(
   "TEXT NOT NULL DEFAULT 'O que deseja buscar?'",
 );
 addColumnIfMissing("macros", "input_variable", "TEXT NOT NULL DEFAULT 'texto'");
+addColumnIfMissing("macros", "app_package", "TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing(
   "device_app_cache",
   "extraction_status",
