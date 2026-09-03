@@ -549,7 +549,7 @@ app.post(
             const adb = getDevice(request.params["deviceId"]);
             if (!adb) throw new Error("DEVICE_NOT_FOUND");
             await adb.openApp(requiredApp.package_name);
-            await new Promise((resolve) => setTimeout(resolve, 800));
+            await new Promise((resolve) => setTimeout(resolve, 3_000));
           }
           return executeMacroSteps(
             request.params["deviceId"],
