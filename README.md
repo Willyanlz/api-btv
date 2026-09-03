@@ -7,7 +7,12 @@ API Node.js/TypeScript com SQLite e driver ADB restrito a operações permitidas
 - Autenticação JWT sem expiração automática.
 - CRUD de dispositivos, macros e comandos permitidos.
 - Execução sequencial de macros com variáveis.
+- Bloqueio de execuções simultâneas por dispositivo.
+- Composição de macros com proteção contra referências circulares.
+- Teste de um passo ou de um intervalo de passos da macro.
 - Reconexão ADB antes de cada operação.
+- Screenshot remoto em `GET /api/v1/devices/:id/screenshot` sem cache.
+- Diagnóstico conjunto da rota Tailscale, disponibilidade do aparelho e autorização ADB.
 - Listagem de apps de usuário com `pm list packages -3`.
 - Exclusão adicional de pacotes `com.amazon.*` e `amazon.*`.
 - Abertura com `monkey`, desinstalação com `adb uninstall` e instalação de APK com `adb install -r`.
@@ -24,3 +29,8 @@ npm start
 ```
 
 Produção: API em `127.0.0.1:3000`, Nginx na porta 80 e Cloudflare Tunnel em `https://box.labswill.com`.
+
+Um endereço IP da rede local pode ser cadastrado quando o servidor que executa a
+API consegue alcançá-lo. Como a API de produção roda em uma VPS, endereços
+privados como `192.168.x.x` exigem Tailscale, VPN site-to-site ou um agente dentro
+da residência. A porta ADB 5555 não deve ser publicada diretamente na internet.
