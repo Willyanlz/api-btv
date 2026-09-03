@@ -7,6 +7,7 @@ export interface CachedApp {
   hasIcon: boolean;
   icon: string;
   color: string;
+  metadataPending: boolean;
 }
 
 interface CacheRow {
@@ -14,6 +15,7 @@ interface CacheRow {
   name: string;
   icon_blob: Buffer | null;
   icon_mime_type: string | null;
+  extraction_status: string;
 }
 
 const knownApps: Record<string, { name: string; icon: string; color: string }> =
@@ -109,6 +111,7 @@ const knownApps: Record<string, { name: string; icon: string; color: string }> =
   };
 
 const synchronizations = new Map<string, Promise<CachedApp[]>>();
+const enrichments = new Map<string, Promise<void>>();
 
 function fallbackName(packageName: string) {
   return (
@@ -123,12 +126,13 @@ function saveMetadata(
 ) {
   db.prepare(
     `INSERT INTO device_app_cache (
-      device_id, package_name, name, icon_blob, icon_mime_type
-    ) VALUES (?, ?, ?, ?, ?)
+      device_id, package_name, name, icon_blob, icon_mime_type, extraction_status
+    ) VALUES (?, ?, ?, ?, ?, 'complete')
     ON CONFLICT(device_id, package_name) DO UPDATE SET
       name = excluded.name,
       icon_blob = excluded.icon_blob,
       icon_mime_type = excluded.icon_mime_type,
+      extraction_status = 'complete',
       updated_at = CURRENT_TIMESTAMP`,
   ).run(
     deviceId,
@@ -139,6 +143,59 @@ function saveMetadata(
   );
 }
 
+function saveFailure(deviceId: string, packageName: string, error: unknown) {
+  db.prepare(
+    `UPDATE device_app_cache SET extraction_status = 'failed',
+     updated_at = CURRENT_TIMESTAMP
+     WHERE device_id = ? AND package_name = ?`,
+  ).run(deviceId, packageName);
+  log(
+    `app-metadata:${packageName}`,
+    "error",
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function startEnrichment(deviceId: string, adb: AdbService) {
+  if (enrichments.has(deviceId)) return;
+
+  const pendingPackages = (
+    db
+      .prepare(
+        `SELECT package_name FROM device_app_cache
+         WHERE device_id = ? AND extraction_status = 'pending'`,
+      )
+      .all(deviceId) as { package_name: string }[]
+  ).map((row) => row.package_name);
+  if (!pendingPackages.length) return;
+
+  let pendingIndex = 0;
+  const extractNext = async (): Promise<void> => {
+    const packageName = pendingPackages[pendingIndex];
+    pendingIndex += 1;
+    if (!packageName) return;
+
+    try {
+      saveMetadata(
+        deviceId,
+        packageName,
+        await adb.extractAppMetadata(packageName),
+      );
+    } catch (error) {
+      saveFailure(deviceId, packageName, error);
+    }
+    await extractNext();
+  };
+  const operation = Promise.all(
+    Array.from({ length: Math.min(3, pendingPackages.length) }, () =>
+      extractNext(),
+    ),
+  )
+    .then(() => undefined)
+    .finally(() => enrichments.delete(deviceId));
+  enrichments.set(deviceId, operation);
+}
+
 async function synchronize(
   deviceId: string,
   adb: AdbService,
@@ -147,7 +204,7 @@ async function synchronize(
   const packageSet = new Set(packages);
   const cachedRows = db
     .prepare(
-      `SELECT package_name, name, icon_blob, icon_mime_type
+      `SELECT package_name, name, icon_blob, icon_mime_type, extraction_status
        FROM device_app_cache WHERE device_id = ?`,
     )
     .all(deviceId) as CacheRow[];
@@ -165,44 +222,26 @@ async function synchronize(
       .filter((packageName) => !packageSet.has(packageName)),
   );
 
-  const pendingPackages = packages.filter(
+  const newPackages = packages.filter(
     (packageName) => !cachedPackages.has(packageName),
   );
-  let pendingIndex = 0;
-  const extractNext = async (): Promise<void> => {
-    const packageName = pendingPackages[pendingIndex];
-    pendingIndex += 1;
-    if (!packageName) return;
-
-    try {
-      saveMetadata(
-        deviceId,
-        packageName,
-        await adb.extractAppMetadata(packageName),
-      );
-    } catch (error) {
-      saveMetadata(deviceId, packageName, {
-        name: null,
-        icon: null,
-        iconMimeType: null,
-      });
-      log(
-        `app-metadata:${packageName}`,
-        "error",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-    await extractNext();
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(3, pendingPackages.length) }, () =>
-      extractNext(),
-    ),
+  const insertPlaceholder = db.prepare(
+    `INSERT OR IGNORE INTO device_app_cache (
+      device_id, package_name, name, extraction_status
+    ) VALUES (?, ?, ?, 'pending')`,
   );
+  const insertTransaction = db.transaction((names: string[]) => {
+    for (const packageName of names) {
+      insertPlaceholder.run(deviceId, packageName, fallbackName(packageName));
+    }
+  });
+  insertTransaction(newPackages);
+
+  startEnrichment(deviceId, adb);
 
   const rows = db
     .prepare(
-      `SELECT package_name, name, icon_blob, icon_mime_type
+      `SELECT package_name, name, icon_blob, icon_mime_type, extraction_status
        FROM device_app_cache WHERE device_id = ? ORDER BY name`,
     )
     .all(deviceId) as CacheRow[];
@@ -213,6 +252,7 @@ async function synchronize(
     hasIcon: Boolean(row.icon_blob && row.icon_mime_type),
     icon: knownApps[row.package_name]?.icon ?? "bi-app",
     color: knownApps[row.package_name]?.color ?? "#34465f",
+    metadataPending: row.extraction_status === "pending",
   }));
 }
 

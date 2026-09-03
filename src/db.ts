@@ -28,6 +28,7 @@ db.exec(`
     name TEXT NOT NULL,
     icon_blob BLOB,
     icon_mime_type TEXT,
+    extraction_status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (device_id, package_name),
@@ -77,6 +78,11 @@ addColumnIfMissing(
   "TEXT NOT NULL DEFAULT 'O que deseja buscar?'",
 );
 addColumnIfMissing("macros", "input_variable", "TEXT NOT NULL DEFAULT 'texto'");
+addColumnIfMissing(
+  "device_app_cache",
+  "extraction_status",
+  "TEXT NOT NULL DEFAULT 'complete'",
+);
 
 export function log(action: string, status: string, message = "") {
   db.prepare(
