@@ -60,6 +60,13 @@ const atomicStepSchema = z.discriminatedUnion("type", [
     type: z.literal("callMacro"),
     macroId: id,
   }),
+  z.object({
+    type: z.literal("clickButton"),
+    buttonId: z.string().min(1).max(80),
+  }),
+  z.object({
+    type: z.literal("clickFocused"),
+  }),
 ]);
 
 const stepSchema = z.discriminatedUnion("type", [
@@ -79,6 +86,34 @@ type AppScreenRow = {
   friendly_name: string;
   activity_name: string;
 };
+
+type AppButtonRow = {
+  id: string;
+  screen_id: string;
+  friendly_name: string;
+  resource_id: string;
+  text: string;
+  content_desc: string;
+  class_name: string;
+  center_x: number;
+  center_y: number;
+  bounds: string;
+};
+
+function serializeAppButton(row: AppButtonRow) {
+  return {
+    id: row.id,
+    screenId: row.screen_id,
+    name: row.friendly_name,
+    resourceId: row.resource_id,
+    text: row.text,
+    contentDesc: row.content_desc,
+    className: row.class_name,
+    centerX: row.center_x,
+    centerY: row.center_y,
+    bounds: row.bounds,
+  };
+}
 
 const schemas = {
   devices: z.object({
@@ -106,20 +141,41 @@ const schemas = {
     })
     .superRefine((value, context) => {
       for (const [index, step] of value.steps.entries()) {
-        if (step.type !== "screenCondition") continue;
-        const screen = db
-          .prepare("SELECT package_name FROM app_screens WHERE id = ?")
-          .get(step.screenId) as { package_name: string } | undefined;
-        if (
-          !screen ||
-          !value.appPackage ||
-          screen.package_name !== value.appPackage
-        ) {
-          context.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["steps", index, "screenId"],
-            message: "A tela escolhida não pertence ao aplicativo esperado.",
-          });
+        if (step.type === "screenCondition") {
+          const screen = db
+            .prepare("SELECT package_name FROM app_screens WHERE id = ?")
+            .get(step.screenId) as { package_name: string } | undefined;
+          if (
+            !screen ||
+            !value.appPackage ||
+            screen.package_name !== value.appPackage
+          ) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["steps", index, "screenId"],
+              message: "A tela escolhida não pertence ao aplicativo esperado.",
+            });
+          }
+        }
+        if (step.type === "clickButton") {
+          const button = db
+            .prepare(
+              `SELECT s.package_name FROM app_buttons b
+               JOIN app_screens s ON s.id = b.screen_id
+               WHERE b.id = ?`,
+            )
+            .get(step.buttonId) as { package_name: string } | undefined;
+          if (
+            !button ||
+            !value.appPackage ||
+            button.package_name !== value.appPackage
+          ) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["steps", index, "buttonId"],
+              message: "O botão escolhido não pertence ao aplicativo esperado.",
+            });
+          }
         }
       }
     }),
@@ -314,6 +370,8 @@ app.get("/api/v1/actions", (_request, response) =>
     { type: "openApp", label: "Abrir aplicativo" },
     { type: "callMacro", label: "Chamar outra macro" },
     { type: "screenCondition", label: "Verificar tela" },
+    { type: "clickButton", label: "Clicar em botão" },
+    { type: "clickFocused", label: "Clicar no foco" },
   ]),
 );
 app.get("/api/v1/screens", (request, response) => {
@@ -537,6 +595,60 @@ async function executeMacroSteps(
           throw new Error(`${branchLabel}, ação ${branchIndex + 1}: ${cause}`);
         }
       }
+    }
+    if (step.type === "clickFocused") {
+      await adb.clickFocused();
+    }
+    if (step.type === "clickButton") {
+      const button = db
+        .prepare("SELECT * FROM app_buttons WHERE id = ?")
+        .get(step.buttonId) as
+        | {
+            id: string;
+            screen_id: string;
+            friendly_name: string;
+            resource_id: string;
+            text: string;
+            content_desc: string;
+            class_name: string;
+            center_x: number;
+            center_y: number;
+            bounds: string;
+          }
+        | undefined;
+      if (!button) throw new Error("BUTTON_NOT_FOUND");
+      const foreground = await adb.foreground();
+      const screen = db
+        .prepare(
+          `SELECT package_name FROM app_screens WHERE id = ?`,
+        )
+        .get(button.screen_id) as { package_name: string } | undefined;
+      const expectedPackage = screen?.package_name;
+      if (
+        expectedPackage &&
+        foreground.packageName &&
+        foreground.packageName !== expectedPackage
+      ) {
+        throw new Error(
+          `BUTTON_WRONG_APP: o app aberto não é o esperado para "${button.friendly_name}"`,
+        );
+      }
+      const nodes = await adb.uiDump();
+      const found = adb.findNode(nodes, {
+        resourceId: button.resource_id || undefined,
+        contentDesc: button.content_desc || undefined,
+        text: button.text || undefined,
+      });
+      if (found) {
+        await adb.tap(found.centerX, found.centerY);
+      } else if (button.center_x && button.center_y) {
+        await adb.tap(button.center_x, button.center_y);
+      } else {
+        throw new Error(
+          `BUTTON_NOT_FOUND: o botão "${button.friendly_name}" não foi localizado e não há posição salva.`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
   };
 
@@ -817,6 +929,17 @@ const appScreenInputSchema = z.object({
   activityName: activityNameSchema,
 });
 
+const appButtonInputSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  resourceId: z.string().max(240).optional(),
+  text: z.string().max(240).optional(),
+  contentDesc: z.string().max(240).optional(),
+  className: z.string().max(240).optional(),
+  centerX: z.number().int().min(0).optional(),
+  centerY: z.number().int().min(0).optional(),
+  bounds: z.string().max(240).optional(),
+});
+
 function serializeAppScreen(row: AppScreenRow) {
   return {
     id: row.id,
@@ -906,6 +1029,125 @@ app.delete("/api/v1/app-screens/:id", (request, response, next) => {
   }
 });
 
+app.get("/api/v1/apps/:packageName/screens/:screenId/buttons", (request, response, next) => {
+  try {
+    const screenId = z.string().min(1).max(80).parse(request.params["screenId"]);
+    const screen = db
+      .prepare("SELECT id FROM app_screens WHERE id = ?")
+      .get(screenId) as { id: string } | undefined;
+    if (!screen) return response.status(404).json({ error: "SCREEN_NOT_FOUND" });
+    const rows = db
+      .prepare(
+        `SELECT * FROM app_buttons WHERE screen_id = ? ORDER BY friendly_name`,
+      )
+      .all(screenId) as AppButtonRow[];
+    response.json(rows.map(serializeAppButton));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1/apps/:packageName/screens/:screenId/buttons", (request, response, next) => {
+  try {
+    const screenId = z.string().min(1).max(80).parse(request.params["screenId"]);
+    const screen = db
+      .prepare("SELECT id FROM app_screens WHERE id = ?")
+      .get(screenId) as { id: string } | undefined;
+    if (!screen) return response.status(404).json({ error: "SCREEN_NOT_FOUND" });
+    const value = appButtonInputSchema.parse(request.body);
+    const row: AppButtonRow = {
+      id: randomUUID(),
+      screen_id: screenId,
+      friendly_name: value.name,
+      resource_id: value.resourceId ?? "",
+      text: value.text ?? "",
+      content_desc: value.contentDesc ?? "",
+      class_name: value.className ?? "",
+      center_x: value.centerX ?? 0,
+      center_y: value.centerY ?? 0,
+      bounds: value.bounds ?? "",
+    };
+    db.prepare(
+      `INSERT INTO app_buttons
+        (id, screen_id, friendly_name, resource_id, text, content_desc,
+         class_name, center_x, center_y, bounds)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.id,
+      row.screen_id,
+      row.friendly_name,
+      row.resource_id,
+      row.text,
+      row.content_desc,
+      row.class_name,
+      row.center_x,
+      row.center_y,
+      row.bounds,
+    );
+    response.status(201).json(serializeAppButton(row));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/v1/app-buttons/:id", (request, response, next) => {
+  try {
+    const value = appButtonInputSchema.parse(request.body);
+    const result = db
+      .prepare(
+        `UPDATE app_buttons SET friendly_name = ?, resource_id = ?, text = ?,
+          content_desc = ?, class_name = ?, center_x = ?, center_y = ?,
+          bounds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      )
+      .run(
+        value.name,
+        value.resourceId ?? "",
+        value.text ?? "",
+        value.contentDesc ?? "",
+        value.className ?? "",
+        value.centerX ?? 0,
+        value.centerY ?? 0,
+        value.bounds ?? "",
+        request.params["id"],
+      );
+    if (!result.changes)
+      return response.status(404).json({ error: "BUTTON_NOT_FOUND" });
+    const row = db
+      .prepare("SELECT * FROM app_buttons WHERE id = ?")
+      .get(request.params["id"]) as AppButtonRow;
+    response.json(serializeAppButton(row));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/v1/app-buttons/:id", (request, response, next) => {
+  try {
+    const used = (
+      db.prepare("SELECT steps_json FROM macros").all() as {
+        steps_json: string;
+      }[]
+    ).some((row) =>
+      row.steps_json.includes(`\"buttonId\":\"${request.params["id"]}\"`),
+    );
+    if (used) {
+      return response.status(409).json({
+        error: "BUTTON_IN_USE",
+        message:
+          "Este botão está sendo usado por uma macro e não pode ser excluído.",
+      });
+    }
+    const result = db
+      .prepare("DELETE FROM app_buttons WHERE id = ?")
+      .run(request.params["id"]);
+    result.changes
+      ? response.status(204).send()
+      : response.status(404).json({ error: "BUTTON_NOT_FOUND" });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get(
   "/api/v1/devices/:id/current-screen",
   async (request, response, next) => {
@@ -974,6 +1216,91 @@ app.post(
          VALUES (?, ?, ?, ?)`,
       ).run(row.id, row.package_name, row.friendly_name, row.activity_name);
       response.status(201).json(serializeAppScreen(row));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.get(
+  `/api/v1/devices/:id/apps/:packageName/screens/:screenId/focus`,
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const screenId = z.string().min(1).max(80).parse(request.params["screenId"]);
+      const screen = db
+        .prepare(`SELECT id FROM app_screens WHERE id = ?`)
+        .get(screenId) as { id: string } | undefined;
+      if (!screen) return response.status(404).json({ error: "SCREEN_NOT_FOUND" });
+      const node = await adb.focusedNode();
+      response.json({ node });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  `/api/v1/devices/:id/apps/:packageName/screens/:screenId/focus/capture`,
+  async (request, response, next) => {
+    try {
+      const adb = getDevice(request.params["id"]);
+      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+      const screenId = z.string().min(1).max(80).parse(request.params["screenId"]);
+      const screen = db
+        .prepare(`SELECT id, package_name FROM app_screens WHERE id = ?`)
+        .get(screenId) as { id: string; package_name: string } | undefined;
+      if (!screen) return response.status(404).json({ error: "SCREEN_NOT_FOUND" });
+      const packageName = packageNameSchema.parse(screen.package_name);
+      const name = z.string().trim().min(2).max(80).parse(request.body?.name);
+      const foreground = await adb.foreground();
+      if (foreground.packageName !== packageName) {
+        return response.status(409).json({
+          error: "APP_NOT_IN_FOREGROUND",
+          message: "Abra este aplicativo na tela que deseja cadastrar.",
+        });
+      }
+      const node = await adb.focusedNode();
+      if (!node) {
+        return response.status(409).json({
+          error: "NO_FOCUSED_NODE",
+          message: "Não foi possível identificar o botão focado.",
+        });
+      }
+      const row = {
+        id: randomUUID(),
+        screen_id: screenId,
+        friendly_name: name,
+        resource_id: node.resourceId,
+        text: node.text,
+        content_desc: node.contentDesc,
+        class_name: node.className,
+        center_x: node.centerX,
+        center_y: node.centerY,
+        bounds: node.bounds,
+      };
+      db.prepare(
+        `INSERT INTO app_buttons
+          (id, screen_id, friendly_name, resource_id, text, content_desc,
+           class_name, center_x, center_y, bounds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        row.id,
+        row.screen_id,
+        row.friendly_name,
+        row.resource_id,
+        row.text,
+        row.content_desc,
+        row.class_name,
+        row.center_x,
+        row.center_y,
+        row.bounds,
+      );
+      const created = db
+        .prepare(`SELECT * FROM app_buttons WHERE id = ?`)
+        .get(row.id) as AppButtonRow;
+      response.status(201).json(serializeAppButton(created));
     } catch (error) {
       next(error);
     }

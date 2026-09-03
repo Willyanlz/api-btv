@@ -28,6 +28,19 @@ export interface AppMetadata {
   iconMimeType: "image/png" | "image/webp" | null;
 }
 
+export interface UiNode {
+  resourceId: string;
+  text: string;
+  contentDesc: string;
+  className: string;
+  package: string;
+  bounds: string;
+  clickable: boolean;
+  focused: boolean;
+  centerX: number;
+  centerY: number;
+}
+
 export class AdbService {
   constructor(
     private readonly host: string,
@@ -409,6 +422,101 @@ export class AdbService {
       { encoding: null },
     );
     return Buffer.from(stdout as unknown as Uint8Array);
+  }
+
+  /** Roda o uiautomator dump e devolve nós como objetos. */
+  async uiDump(): Promise<UiNode[]> {
+    await this.ensureConnected();
+    const { stdout } = await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "uiautomator",
+      "dump",
+      "/sdcard/wd.xml",
+    ]);
+    const { stdout: xml } = await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "cat",
+      "/sdcard/wd.xml",
+    ]);
+    // limpa arquivo temporário na TV
+    try {
+      await this.execute(["-s", this.target, "shell", "rm", "-f", "/sdcard/wd.xml"]);
+    } catch {
+      // arquivo pode já ter sido removido
+    }
+    void stdout;
+    const nodes: UiNode[] = [];
+    const regex =
+      /<node\b[^>]*>/g;
+    for (const match of String(xml).matchAll(regex)) {
+      const tag = match[0];
+      const attr = (name: string) =>
+        new RegExp(`${name}="([^"]*)"`).exec(tag)?.[1] ?? "";
+      const bounds = attr("bounds");
+      const m = /\[(\d+),(\d+)\]\[(\d+),(\d+)\]/.exec(bounds);
+      const clickable = attr("clickable");
+      nodes.push({
+        resourceId: attr("resource-id"),
+        text: attr("text"),
+        contentDesc: attr("content-desc"),
+        className: attr("class"),
+        package: attr("package"),
+        bounds,
+        clickable: clickable === "true",
+        focused: attr("focused") === "true",
+        centerX:
+          m ? Math.round((Number(m[1]) + Number(m[3])) / 2) : 0,
+        centerY:
+          m ? Math.round((Number(m[2]) + Number(m[4])) / 2) : 0,
+      });
+    }
+    return nodes;
+  }
+
+  /** Nó focado (focused="true"). */
+  async focusedNode(): Promise<UiNode | null> {
+    const nodes = await this.uiDump();
+    return nodes.find((node) => node.focused) ?? null;
+  }
+
+  /** Localiza um nó por seletor (resourceId → contentDesc → text). */
+  findNode(nodes: UiNode[], selector: { resourceId?: string; contentDesc?: string; text?: string }) {
+    if (selector.resourceId) {
+      const hit = nodes.find((node) => node.resourceId === selector.resourceId);
+      if (hit) return hit;
+    }
+    if (selector.contentDesc) {
+      const hit = nodes.find((node) => node.contentDesc === selector.contentDesc);
+      if (hit) return hit;
+    }
+    if (selector.text) {
+      const hit = nodes.find((node) => node.text === selector.text);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /** Toque por coordenada (input tap). */
+  async tap(x: number, y: number) {
+    await this.ensureConnected();
+    await this.execute([
+      "-s",
+      this.target,
+      "shell",
+      "input",
+      "tap",
+      String(Math.round(x)),
+      String(Math.round(y)),
+    ]);
+  }
+
+  /** Clica no elemento focado (DPAD_CENTER). */
+  async clickFocused() {
+    await this.key("ENTER");
   }
 
   async tailscaleStatus(): Promise<{ ok: boolean; detail: string }> {

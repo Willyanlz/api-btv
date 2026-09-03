@@ -70,6 +70,22 @@ db.exec(`
     UNIQUE(package_name, friendly_name),
     UNIQUE(package_name, activity_name)
   );
+  CREATE TABLE IF NOT EXISTS app_buttons (
+    id TEXT PRIMARY KEY,
+    screen_id TEXT NOT NULL,
+    friendly_name TEXT NOT NULL,
+    resource_id TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    content_desc TEXT NOT NULL DEFAULT '',
+    class_name TEXT NOT NULL DEFAULT '',
+    center_x INTEGER NOT NULL DEFAULT 0,
+    center_y INTEGER NOT NULL DEFAULT 0,
+    bounds TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(screen_id, friendly_name),
+    FOREIGN KEY (screen_id) REFERENCES app_screens(id) ON DELETE CASCADE
+  );
 `);
 
 function addColumnIfMissing(table: string, column: string, definition: string) {
