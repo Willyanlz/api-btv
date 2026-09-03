@@ -98,14 +98,35 @@ export class AdbService {
 
   async text(value: string) {
     await this.ensureConnected();
-    await this.execute([
-      "-s",
-      this.target,
-      "shell",
-      "input",
-      "text",
-      value.replaceAll(" ", "%s"),
-    ]);
+    const normalized = value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim();
+    const words = normalized.split(/\s+/).filter(Boolean);
+
+    for (const [index, word] of words.entries()) {
+      const safeWord = word.replace(/[^a-zA-Z0-9._@-]/g, "");
+      if (safeWord) {
+        await this.execute([
+          "-s",
+          this.target,
+          "shell",
+          "input",
+          "text",
+          safeWord,
+        ]);
+      }
+      if (index < words.length - 1) {
+        await this.execute([
+          "-s",
+          this.target,
+          "shell",
+          "input",
+          "keyevent",
+          "62",
+        ]);
+      }
+    }
   }
 
   async openApp(packageName: string) {
