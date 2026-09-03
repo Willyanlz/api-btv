@@ -33,6 +33,24 @@ export class AdbService {
     return run('adb', args, { timeout: 15_000, maxBuffer: 5_000_000, ...options });
   }
 
+  private async ensureConnected() {
+    try {
+      await this.execute(['connect', this.target]);
+    } catch {
+      // O estado detalhado abaixo produz uma mensagem mais útil que o stderr do connect.
+    }
+    const { stdout } = await this.execute(['devices', '-l']);
+    const line = String(stdout)
+      .split('\n')
+      .find((item) => item.startsWith(this.target));
+    if (line?.includes('unauthorized')) {
+      throw new Error('ADB_UNAUTHORIZED: confirme "Sempre permitir deste computador" na TV Box.');
+    }
+    if (!line || !line.includes('device')) {
+      throw new Error(`ADB_OFFLINE: não foi possível conectar a ${this.target}.`);
+    }
+  }
+
   async status() {
     try {
       await this.execute(['connect', this.target]);
@@ -56,18 +74,22 @@ export class AdbService {
   }
 
   async key(key: RemoteKey) {
+    await this.ensureConnected();
     await this.execute(['-s', this.target, 'shell', 'input', 'keyevent', String(keyCodes[key])]);
   }
 
   async text(value: string) {
+    await this.ensureConnected();
     await this.execute(['-s', this.target, 'shell', 'input', 'text', value.replaceAll(' ', '%s')]);
   }
 
   async openApp(packageName: string) {
+    await this.ensureConnected();
     await this.execute(['-s', this.target, 'shell', 'monkey', '-p', packageName, '1']);
   }
 
   async foreground() {
+    await this.ensureConnected();
     const { stdout } = await this.execute([
       '-s', this.target, 'shell', 'dumpsys', 'activity', 'activities',
     ]);
@@ -77,6 +99,7 @@ export class AdbService {
   }
 
   async screenshot() {
+    await this.ensureConnected();
     const { stdout } = await this.execute(
       ['-s', this.target, 'exec-out', 'screencap', '-p'],
       { encoding: null },

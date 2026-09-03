@@ -411,6 +411,12 @@ app.get('/api/v1/logs', (_request, response) =>
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : 'Unknown error';
   log('request', 'error', message);
+  if (message.startsWith('ADB_UNAUTHORIZED')) {
+    return response.status(409).json({ error: 'ADB_UNAUTHORIZED', message });
+  }
+  if (message.startsWith('ADB_OFFLINE')) {
+    return response.status(503).json({ error: 'ADB_OFFLINE', message });
+  }
   response.status(400).json({ error: 'REQUEST_FAILED', message });
 });
 
