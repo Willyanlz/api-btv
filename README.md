@@ -37,6 +37,32 @@ npm run build
 npm start
 ```
 
+## Pacote Docker isolado
+
+O arquivo `compose.yml` executa a API e um sidecar Tailscale exclusivo do projeto.
+ADB, AAPT, Node.js, SQLite e o estado da tailnet ficam dentro do pacote; nenhuma
+dessas dependências precisa ser instalada no host. Somente a porta
+`127.0.0.1:3100` é publicada para o Cloudflare Tunnel existente.
+
+Diretórios persistentes:
+
+- `data/`: banco SQLite.
+- `adb-keys/`: chaves de autorização ADB.
+- `tailscale-state/`: identidade da conta Tailscale exclusiva.
+- `tailscale-run/`: socket interno compartilhado somente entre a API e o Tailscale do projeto.
+
+Inicialização:
+
+```bash
+cp .env.container.example .env
+docker compose up -d --build
+docker compose exec tailscale-box tailscale up --hostname=box-labswill --accept-dns=false
+```
+
+Abra o link mostrado pelo último comando usando a conta Tailscale destinada às
+TVs. Configure o Cloudflare Tunnel geral para encaminhar `box.labswill.com` para
+`http://localhost:3100`.
+
 ## Reinstalação em outro servidor Ubuntu
 
 Pré-requisitos: Ubuntu 22.04/24.04, Node.js 20+, ADB, `aapt`, `unzip`, Nginx e

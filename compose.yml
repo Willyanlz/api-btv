@@ -1,0 +1,75 @@
+name: universal-remote
+
+services:
+  tailscale-box:
+    image: tailscale/tailscale:stable
+    container_name: universal-remote-tailscale
+    hostname: box-labswill
+    entrypoint: ["/usr/local/bin/tailscaled"]
+    command:
+      - --state=/var/lib/tailscale/tailscaled.state
+      - --socket=/var/run/tailscale/tailscaled.sock
+    environment:
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_USERSPACE: "false"
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - ./tailscale-run:/var/run/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "127.0.0.1:3100:3000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "tailscale", "status", "--peers=false"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  api-box:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: universal-remote-api
+    network_mode: service:tailscale-box
+    depends_on:
+      tailscale-box:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+    volumes:
+      - ./data:/data
+      - ./adb-keys:/home/node/.android
+      - ./tailscale-run:/var/run/tailscale
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
