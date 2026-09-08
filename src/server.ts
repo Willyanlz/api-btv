@@ -949,6 +949,7 @@ app.post("/api/v1/devices/:id/mirror-ticket", async (request, response, next) =>
   url.searchParams.set("maxFps", "30");
   url.searchParams.set("maxSize", "1280");
   url.searchParams.set("bitrate", "2500000");
+  url.searchParams.set("pathname", `/mirror/?ticket=${ticket}`);
   response.json({ url: url.toString(), expiresInSeconds: 120 });
   } catch (error) {
     next(error);
@@ -989,6 +990,7 @@ app.post("/api/v1/mirror-ticket", async (request, response, next) => {
   url.searchParams.set("maxFps", "30");
   url.searchParams.set("maxSize", "1280");
   url.searchParams.set("bitrate", "2500000");
+  url.searchParams.set("pathname", `/mirror/?ticket=${ticket}`);
   response.json({ url: url.toString(), expiresInSeconds: 120 });
   } catch (error) {
     next(error);
@@ -1702,9 +1704,11 @@ server.on("upgrade", (request, socket, head) => {
   const hostname = request.headers.host?.split(":")[0];
   const session = cookieValue(request.headers.cookie, "mirror_session");
   const prefixedRequest = request.url?.startsWith("/mirror/") ?? false;
+  const requestUrl = new URL(request.url ?? "/", "http://mirror.local");
+  const ticket = requestUrl.searchParams.get("ticket") ?? undefined;
   if (
     (hostname !== config.MIRROR_HOST && !prefixedRequest) ||
-    !validMirrorCredential(session)
+    (!validMirrorCredential(ticket) && !validMirrorCredential(session))
   ) {
     socket.destroy();
     return;
