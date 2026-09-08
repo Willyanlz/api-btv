@@ -49,6 +49,8 @@ services:
       - .env
     environment:
       TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      # Mantem compatibilidade com chaves importadas de instalacoes anteriores.
+      ADB_VENDOR_KEYS: /home/node/.android/legacy
     volumes:
       - ./data:/data
       - ./adb-keys:/home/node/.android

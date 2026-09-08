@@ -48,6 +48,11 @@ Diretórios persistentes:
 
 - `data/`: banco SQLite.
 - `adb-keys/`: chaves de autorização ADB.
+
+As chaves ADB ficam persistidas fora do container. Recriar ou atualizar o
+serviço não gera uma identidade nova. Chaves recuperadas de instalações
+anteriores podem ser colocadas em `adb-keys/legacy/`; o backend tentará essas
+identidades também, preservando aparelhos que já haviam sido autorizados.
 - `tailscale-state/`: identidade da conta Tailscale exclusiva.
 - `tailscale-run/`: socket interno compartilhado somente entre a API e o Tailscale do projeto.
 
