@@ -77,7 +77,10 @@ services:
         max-file: "3"
 
   scrcpy-web:
-    image: jchapz30/ws-scrcpy-web:beta
+    build:
+      context: .
+      dockerfile: Dockerfile.scrcpy
+    image: universal-remote-scrcpy-web
     container_name: universal-remote-scrcpy
     network_mode: service:tailscale-box
     depends_on:
@@ -85,6 +88,8 @@ services:
         condition: service_healthy
     volumes:
       - ./scrcpy-data:/data
+    environment:
+      ADB_PATH: /usr/bin/adb
     restart: unless-stopped
     mem_limit: 768m
     cpus: 1.5

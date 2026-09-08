@@ -1,0 +1,18 @@
+/* A PWA já fornece o controle remoto; o embed deve conter somente a tela. */
+body[data-embed-entry] .control-buttons-list {
+  display: none !important;
+}
+
+body[data-embed-entry] .device-view {
+  justify-content: center !important;
+  width: 100vw;
+  height: 100vh;
+}
+
+body[data-embed-entry] .video,
+body[data-embed-entry] .video-layer,
+body[data-embed-entry] .touch-layer,
+body[data-embed-entry] canvas {
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+}

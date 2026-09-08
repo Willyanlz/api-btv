@@ -1,0 +1,18 @@
+FROM jchapz30/ws-scrcpy-web:beta
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends adb \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV ADB_PATH=/usr/bin/adb
+
+COPY --chmod=755 deploy/scrcpy-entrypoint.sh /usr/local/bin/labswill-scrcpy
+COPY deploy/scrcpy-embed.css /app/dist/public/labswill-embed.css
+
+RUN sed -i \
+    's#</head>#<link rel="stylesheet" href="labswill-embed.css">\n</head>#' \
+    /app/dist/public/embed.html
+
+ENTRYPOINT ["/usr/local/bin/tini", "-g", "--", "/usr/local/bin/labswill-scrcpy"]

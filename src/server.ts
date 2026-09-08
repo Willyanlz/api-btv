@@ -943,6 +943,7 @@ app.post("/api/v1/devices/:id/mirror-ticket", async (request, response, next) =>
   url.searchParams.set("device", `${row.host}:${row.port}`);
   url.searchParams.set("ticket", ticket);
   url.searchParams.set("codec", "h264");
+  url.searchParams.set("secure", "true");
   url.searchParams.set("audio", "false");
   url.searchParams.set("keyboard", "false");
   url.searchParams.set("deviceKind", "phone");
@@ -984,6 +985,7 @@ app.post("/api/v1/mirror-ticket", async (request, response, next) => {
   url.searchParams.set("device", `${input.data.host}:${input.data.port}`);
   url.searchParams.set("ticket", ticket);
   url.searchParams.set("codec", "h264");
+  url.searchParams.set("secure", "true");
   url.searchParams.set("audio", "false");
   url.searchParams.set("keyboard", "false");
   url.searchParams.set("deviceKind", "phone");
