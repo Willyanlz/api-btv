@@ -12,12 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import {
-  AdbService,
-  FocusDirection,
-  keyCodes,
-  RemoteKey,
-} from "./adb.js";
+import { AdbService, keyCodes, RemoteKey } from "./adb.js";
 import {
   getCachedIcon,
   removeCachedApp,
@@ -145,10 +140,6 @@ const atomicStepSchema = z.discriminatedUnion("type", [
     buttonId: z.string().min(1).max(80),
   }),
   z.object({
-    type: z.literal("focusButton"),
-    buttonId: z.string().min(1).max(80),
-  }),
-  z.object({
     type: z.literal("clickFocused"),
   }),
 ]);
@@ -241,7 +232,7 @@ const schemas = {
             });
           }
         }
-        if (step.type === "clickButton" || step.type === "focusButton") {
+        if (step.type === "clickButton") {
           const button = db
             .prepare(
               `SELECT s.package_name FROM app_buttons b
@@ -271,6 +262,50 @@ const schemas = {
     enabled,
   }),
 };
+
+// Migra macros criadas quando existia a navegação automática por D-pad.
+// O botão continua útil, mas passa a ser acionado diretamente por toque.
+function replaceLegacyFocusSteps(steps: unknown[]): { steps: unknown[]; changed: boolean } {
+  let changed = false;
+  const converted = steps.map((raw) => {
+    if (!raw || typeof raw !== "object") return raw;
+    const step = { ...(raw as Record<string, unknown>) };
+    if (step.type === "focusButton") {
+      step.type = "clickButton";
+      changed = true;
+    }
+    if (step.type === "screenCondition") {
+      for (const branch of ["whenTrue", "whenFalse"] as const) {
+        if (Array.isArray(step[branch])) {
+          const nested = replaceLegacyFocusSteps(step[branch] as unknown[]);
+          step[branch] = nested.steps;
+          changed ||= nested.changed;
+        }
+      }
+    }
+    return step;
+  });
+  return { steps: converted, changed };
+}
+
+for (const macro of db.prepare("SELECT id, steps_json FROM macros").all() as {
+  id: string;
+  steps_json: string;
+}[]) {
+  try {
+    const parsed = JSON.parse(macro.steps_json);
+    if (!Array.isArray(parsed)) continue;
+    const migrated = replaceLegacyFocusSteps(parsed);
+    if (migrated.changed) {
+      db.prepare(
+        "UPDATE macros SET steps_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      ).run(JSON.stringify(migrated.steps), macro.id);
+    }
+  } catch {
+    log("macro_migration", "failed", `Macro ${macro.id} não pôde ser migrada`);
+  }
+}
+
 const commandSeeds: {
   id: string;
   label: string;
@@ -454,7 +489,6 @@ app.get("/api/v1/actions", (_request, response) =>
     { type: "callMacro", label: "Chamar outra macro" },
     { type: "screenCondition", label: "Verificar tela" },
     { type: "clickButton", label: "Clicar em botão" },
-    { type: "focusButton", label: "Focar em botão" },
   ]),
 );
 app.get("/api/v1/screens", (request, response) => {
@@ -610,118 +644,6 @@ class MacroStepError extends Error {
   }
 }
 
-type FocusEdge = { direction: FocusDirection; to: string };
-
-function getCachedFocusRoute(
-  screenId: string,
-  fromNode: string,
-  toNode: string,
-): FocusEdge[] {
-  const rows = db
-    .prepare(
-      `SELECT from_node, direction, to_node FROM focus_routes
-       WHERE screen_id = ?`,
-    )
-    .all(screenId) as { from_node: string; direction: string; to_node: string }[];
-  const edges = new Map<string, FocusEdge[]>();
-  for (const row of rows) {
-    if (!edges.has(row.from_node)) edges.set(row.from_node, []);
-    edges.get(row.from_node)!.push({
-      direction: row.direction as FocusDirection,
-      to: row.to_node,
-    });
-  }
-  const queue: { node: string; path: FocusEdge[] }[] = [
-    { node: fromNode, path: [] },
-  ];
-  const visited = new Set([fromNode]);
-  while (queue.length) {
-    const current = queue.shift()!;
-    if (current.node === toNode) return current.path;
-    for (const edge of edges.get(current.node) ?? []) {
-      if (!visited.has(edge.to)) {
-        visited.add(edge.to);
-        queue.push({ node: edge.to, path: [...current.path, edge] });
-      }
-    }
-  }
-  return [];
-}
-
-function recordFocusEdge(
-  screenId: string,
-  from: string,
-  direction: string,
-  to: string,
-) {
-  db.prepare(
-    `INSERT INTO focus_routes (screen_id, from_node, direction, to_node, hit_count)
-     VALUES (?, ?, ?, ?, 1)
-     ON CONFLICT(screen_id, from_node, direction)
-     DO UPDATE SET to_node = excluded.to_node,
-                   hit_count = hit_count + 1,
-                   last_used_at = CURRENT_TIMESTAMP`,
-  ).run(screenId, from, direction, to);
-}
-
-async function focusWithRoutes(
-  adb: AdbService,
-  screenId: string,
-  selector: { resourceId?: string; contentDesc?: string; text?: string },
-  friendlyName: string,
-): Promise<void> {
-  let nodes = await adb.uiDump();
-  const target = adb.findNode(nodes, selector);
-  if (!target) {
-    throw new Error(
-      `FOCUS_TARGET_MISSING: "${friendlyName}" não está visível nesta tela.`,
-    );
-  }
-  let focused = nodes.find((node) => node.focused);
-  if (focused && adb.matchesSelector(focused, selector)) return;
-
-  let stepsUsed = 0;
-  const maxSteps = 24;
-
-  if (focused) {
-    const fromNode = adb.nodeIdentity(focused);
-    const toNode = adb.nodeIdentity(target);
-    const route = getCachedFocusRoute(screenId, fromNode, toNode);
-    if (route.length) {
-      let diverged = false;
-      for (const edge of route) {
-        await adb.pressDirection(edge.direction);
-        nodes = await adb.uiDump();
-        stepsUsed += 1;
-        const after = nodes.find((node) => node.focused);
-        if (!after) {
-          diverged = true;
-          break;
-        }
-        if (adb.nodeIdentity(after) !== edge.to) {
-          recordFocusEdge(screenId, fromNode, edge.direction, adb.nodeIdentity(after));
-          diverged = true;
-          break;
-        }
-        if (adb.matchesSelector(after, selector)) return;
-      }
-      if (!diverged) return;
-    }
-  }
-
-  const result = await adb.focusTarget({
-    selector,
-    maxSteps: Math.max(1, maxSteps - stepsUsed),
-    onEdge: (from, direction, to) =>
-      recordFocusEdge(screenId, from, direction, to),
-  });
-  if (!result.reached) {
-    throw new Error(
-      `FOCUS_NOT_REACHED: não consegui posicionar o foco em "${friendlyName}".`,
-    );
-  }
-}
-
 async function executeMacroSteps(
   deviceId: string,
   macroId: string,
@@ -844,53 +766,6 @@ async function executeMacroSteps(
         );
       }
       await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-    if (step.type === "focusButton") {
-      const button = db
-        .prepare("SELECT * FROM app_buttons WHERE id = ?")
-        .get(step.buttonId) as
-        | {
-            id: string;
-            screen_id: string;
-            friendly_name: string;
-            resource_id: string;
-            text: string;
-            content_desc: string;
-            class_name: string;
-            center_x: number;
-            center_y: number;
-            bounds: string;
-          }
-        | undefined;
-      if (!button) throw new Error("BUTTON_NOT_FOUND");
-      const foreground = await adb.foreground();
-      const screen = db
-        .prepare(
-          `SELECT id, package_name FROM app_screens WHERE id = ?`,
-        )
-        .get(button.screen_id) as
-        | { id: string; package_name: string }
-        | undefined;
-      const expectedPackage = screen?.package_name;
-      if (
-        expectedPackage &&
-        foreground.packageName &&
-        foreground.packageName !== expectedPackage
-      ) {
-        throw new Error(
-          `FOCUS_WRONG_APP: o app aberto não é o esperado para "${button.friendly_name}"`,
-        );
-      }
-      await focusWithRoutes(
-        adb,
-        button.screen_id,
-        {
-          resourceId: button.resource_id || undefined,
-          contentDesc: button.content_desc || undefined,
-          text: button.text || undefined,
-        },
-        button.friendly_name,
-      );
     }
   };
 
@@ -1521,25 +1396,6 @@ app.post(
          VALUES (?, ?, ?, ?)`,
       ).run(row.id, row.package_name, row.friendly_name, row.activity_name);
       response.status(201).json(serializeAppScreen(row));
-    } catch (error) {
-      next(error);
-    }
-  },
-);
-
-app.get(
-  `/api/v1/devices/:id/apps/:packageName/screens/:screenId/focus`,
-  async (request, response, next) => {
-    try {
-      const adb = getDevice(request.params["id"]);
-      if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
-      const screenId = z.string().min(1).max(80).parse(request.params["screenId"]);
-      const screen = db
-        .prepare(`SELECT id FROM app_screens WHERE id = ?`)
-        .get(screenId) as { id: string } | undefined;
-      if (!screen) return response.status(404).json({ error: "SCREEN_NOT_FOUND" });
-      const node = await adb.focusedNode();
-      response.json({ node });
     } catch (error) {
       next(error);
     }
