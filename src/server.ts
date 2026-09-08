@@ -47,7 +47,11 @@ function validMirrorCredential(raw: string | undefined) {
   }
 }
 
-mirrorProxy.on("error", (_error, _request, response) => {
+mirrorProxy.on("error", (error, request, response) => {
+  console.error("Mirror proxy error", {
+    message: error.message,
+    url: request.url,
+  });
   if (response && "writeHead" in response) {
     const httpResponse = response as import("node:http").ServerResponse;
     if (!httpResponse.headersSent) httpResponse.writeHead(502);
