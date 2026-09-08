@@ -4,7 +4,9 @@ import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import jwt from "jsonwebtoken";
 import pinoHttp from "pino-http";
+import httpProxy from "http-proxy";
 import { z } from "zod";
+import { createServer } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +27,79 @@ import { config } from "./config.js";
 import { db, log } from "./db.js";
 
 const app = express();
+app.set("trust proxy", 1);
+const mirrorProxy = httpProxy.createProxyServer({
+  target: config.MIRROR_TARGET,
+  ws: true,
+  changeOrigin: false,
+  xfwd: true,
+});
+
+function cookieValue(header: string | undefined, name: string) {
+  return header
+    ?.split(";")
+    .map((item) => item.trim().split("="))
+    .find(([key]) => key === name)?.[1];
+}
+
+function validMirrorCredential(raw: string | undefined) {
+  if (!raw) return false;
+  try {
+    const payload = jwt.verify(raw, config.JWT_SECRET) as jwt.JwtPayload;
+    return payload["aud"] === "device-mirror";
+  } catch {
+    return false;
+  }
+}
+
+mirrorProxy.on("error", (_error, _request, response) => {
+  if (response && "writeHead" in response) {
+    const httpResponse = response as import("node:http").ServerResponse;
+    if (!httpResponse.headersSent) httpResponse.writeHead(502);
+    httpResponse.end("Espelhamento indisponível");
+  }
+});
+
+mirrorProxy.on("proxyRes", (proxyResponse, request) => {
+  const upstreamCookies = (proxyResponse.headers["set-cookie"] ?? []).map(
+    (cookie) =>
+      `${cookie.replace(/;\s*SameSite=Strict/gi, "").replace(/;\s*Secure/gi, "")}; Secure; SameSite=None; Partitioned`,
+  );
+  const requestUrl = new URL(request.url ?? "/", "http://mirror.local");
+  const ticket = requestUrl.searchParams.get("ticket") ?? undefined;
+  if (validMirrorCredential(ticket)) {
+    const mirrorSession = jwt.sign(
+      { aud: "device-mirror" },
+      config.JWT_SECRET,
+      { expiresIn: "1h" },
+    );
+    upstreamCookies.push(
+      `mirror_session=${mirrorSession}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/; Max-Age=3600`,
+    );
+  }
+  if (upstreamCookies.length) {
+    proxyResponse.headers["set-cookie"] = upstreamCookies;
+  }
+});
+
+app.use((request, response, next) => {
+  const ticket =
+    typeof request.query["ticket"] === "string"
+      ? request.query["ticket"]
+      : undefined;
+  const session = cookieValue(request.headers.cookie, "mirror_session");
+  const prefixedRequest = request.path.startsWith("/mirror/");
+  const mirrorHostRequest = request.hostname === config.MIRROR_HOST;
+  const authenticatedAsset = validMirrorCredential(session);
+  if (!prefixedRequest && !mirrorHostRequest && !authenticatedAsset) {
+    return next();
+  }
+  if (!validMirrorCredential(ticket) && !validMirrorCredential(session)) {
+    return response.status(401).send("Sessão de espelhamento inválida");
+  }
+  if (prefixedRequest) request.url = request.url.replace(/^\/mirror/, "");
+  mirrorProxy.web(request, response);
+});
 
 const id = z
   .string()
@@ -305,8 +380,7 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-        // blob: é usado pelos screenshots carregados no <img> do controle remoto.
-        "img-src": ["'self'", "data:", "blob:"],
+        "img-src": ["'self'", "data:"],
       },
     },
   }),
@@ -968,16 +1042,79 @@ app.get("/api/v1/devices/:id/status", async (request, response) => {
     : response.status(404).json({ error: "DEVICE_NOT_FOUND" });
 });
 
-app.get("/api/v1/devices/:id/screenshot", async (request, response, next) => {
+app.post("/api/v1/devices/:id/mirror-ticket", async (request, response, next) => {
   try {
-    const adb = getDevice(request.params["id"]);
-    if (!adb) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
-    const screenshot = await adb.screenshot();
-    log("screenshot", "success", request.params["id"]);
-    response
-      .setHeader("Content-Type", "image/png")
-      .setHeader("Cache-Control", "no-store");
-    response.send(screenshot);
+  const row = db
+    .prepare("SELECT host, port FROM devices WHERE id=? AND enabled=1")
+    .get(request.params["id"]) as { host: string; port: number } | undefined;
+  if (!row) return response.status(404).json({ error: "DEVICE_NOT_FOUND" });
+  const status = await new AdbService(row.host, row.port).status();
+  if (status.connection !== "device") {
+    return response.status(409).json({
+      error: "ADB_NOT_READY",
+      message:
+        status.connection === "unauthorized"
+          ? "Confirme a autorização na TV."
+          : "A TV está desconectada.",
+    });
+  }
+
+  const ticket = jwt.sign(
+    { aud: "device-mirror", deviceId: request.params["id"] },
+    config.JWT_SECRET,
+    { expiresIn: "2m" },
+  );
+  const url = new URL(config.MIRROR_PUBLIC_URL);
+  url.searchParams.set("device", `${row.host}:${row.port}`);
+  url.searchParams.set("ticket", ticket);
+  url.searchParams.set("codec", "h264");
+  url.searchParams.set("audio", "false");
+  url.searchParams.set("keyboard", "false");
+  url.searchParams.set("deviceKind", "phone");
+  url.searchParams.set("maxFps", "30");
+  url.searchParams.set("maxSize", "1280");
+  url.searchParams.set("bitrate", "2500000");
+  response.json({ url: url.toString(), expiresInSeconds: 120 });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1/mirror-ticket", async (request, response, next) => {
+  try {
+  const input = z
+    .object({
+      host: z.string().min(1).max(253).regex(/^[a-zA-Z0-9.:-]+$/),
+      port: z.number().int().min(1).max(65535).default(5555),
+    })
+    .safeParse(request.body);
+  if (!input.success) {
+    return response.status(400).json({ error: "INVALID_MIRROR_TARGET" });
+  }
+  const status = await new AdbService(input.data.host, input.data.port).status();
+  if (status.connection !== "device") {
+    return response.status(409).json({
+      error: "ADB_NOT_READY",
+      message:
+        status.connection === "unauthorized"
+          ? "Confirme a autorização na TV."
+          : "A TV está desconectada.",
+    });
+  }
+  const ticket = jwt.sign({ aud: "device-mirror" }, config.JWT_SECRET, {
+    expiresIn: "2m",
+  });
+  const url = new URL(config.MIRROR_PUBLIC_URL);
+  url.searchParams.set("device", `${input.data.host}:${input.data.port}`);
+  url.searchParams.set("ticket", ticket);
+  url.searchParams.set("codec", "h264");
+  url.searchParams.set("audio", "false");
+  url.searchParams.set("keyboard", "false");
+  url.searchParams.set("deviceKind", "phone");
+  url.searchParams.set("maxFps", "30");
+  url.searchParams.set("maxSize", "1280");
+  url.searchParams.set("bitrate", "2500000");
+  response.json({ url: url.toString(), expiresInSeconds: 120 });
   } catch (error) {
     next(error);
   }
@@ -1703,6 +1840,25 @@ app.use(
   },
 );
 
-app.listen(config.PORT, config.HOST, () =>
+const server = createServer(app);
+
+server.on("upgrade", (request, socket, head) => {
+  const hostname = request.headers.host?.split(":")[0];
+  const session = cookieValue(request.headers.cookie, "mirror_session");
+  const prefixedRequest = request.url?.startsWith("/mirror/") ?? false;
+  if (
+    (hostname !== config.MIRROR_HOST && !prefixedRequest) ||
+    !validMirrorCredential(session)
+  ) {
+    socket.destroy();
+    return;
+  }
+  if (prefixedRequest && request.url) {
+    request.url = request.url.replace(/^\/mirror/, "");
+  }
+  mirrorProxy.ws(request, socket, head);
+});
+
+server.listen(config.PORT, config.HOST, () =>
   console.log(`API on ${config.HOST}:${config.PORT}`),
 );

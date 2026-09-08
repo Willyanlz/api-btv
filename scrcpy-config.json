@@ -1,0 +1,11 @@
+{
+  "installMode": "container",
+  "webPort": 8000,
+  "firstRunComplete": true,
+  "autoUpdate": false,
+  "allowedHosts": ["mirror.labswill.com", "box.labswill.com"],
+  "frameAncestors": [
+    "https://app-btv.vercel.app",
+    "http://localhost"
+  ]
+}

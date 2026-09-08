@@ -417,15 +417,6 @@ export class AdbService {
     ]);
   }
 
-  async screenshot() {
-    await this.ensureConnected();
-    const { stdout } = await this.execute(
-      ["-s", this.target, "exec-out", "screencap", "-p"],
-      { encoding: null },
-    );
-    return Buffer.from(stdout as unknown as Uint8Array);
-  }
-
   /** Roda o uiautomator dump e devolve nós como objetos. */
   async uiDump(): Promise<UiNode[]> {
     await this.ensureConnected();

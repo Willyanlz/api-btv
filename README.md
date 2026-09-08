@@ -14,8 +14,9 @@ API Node.js/TypeScript com SQLite e driver ADB restrito a operações permitidas
 - Teste de um passo ou de um intervalo de passos da macro.
 - Condição por tela conhecida com caminhos independentes; o catálogo começa pela **Tela de busca** do UniTV.
 - Reconexão ADB antes de cada operação.
-- Screenshot remoto em `GET /api/v1/devices/:id/screenshot` sem cache.
-- Conexões ADB já autorizadas são reutilizadas para acelerar screenshots e comandos.
+- Espelhamento ao vivo baseado em scrcpy, com vídeo H.264 e controle por toque.
+- Sessões de espelhamento usam tickets curtos e cookie seguro; o serviço scrcpy
+  não fica exposto diretamente à rede.
 - Diagnóstico conjunto da rota Tailscale, disponibilidade do aparelho e autorização ADB.
 - Consulta, ativação e desativação verificadas do Tailscale como VPN sempre ativa.
 - Listagem de apps de usuário com `pm list packages -3`.
@@ -53,6 +54,11 @@ As chaves ADB ficam persistidas fora do container. Recriar ou atualizar o
 serviço não gera uma identidade nova. Chaves recuperadas de instalações
 anteriores podem ser colocadas em `adb-keys/legacy/`; o backend tentará essas
 identidades também, preservando aparelhos que já haviam sido autorizados.
+
+O diretório `scrcpy-data/` mantém as dependências e configurações próprias do
+espelhamento. O vídeo usa `https://box.labswill.com/mirror`, no mesmo Cloudflare
+Tunnel já configurado. O backend valida o ticket e encaminha HTTP/WebSocket
+internamente; nenhuma porta adicional é publicada.
 - `tailscale-state/`: identidade da conta Tailscale exclusiva.
 - `tailscale-run/`: socket interno compartilhado somente entre a API e o Tailscale do projeto.
 
