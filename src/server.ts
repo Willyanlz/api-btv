@@ -1703,15 +1703,11 @@ app.use(
 const server = createServer(app);
 
 server.on("upgrade", (request, socket, head) => {
-  const hostname = request.headers.host?.split(":")[0];
   const session = cookieValue(request.headers.cookie, "mirror_session");
   const prefixedRequest = request.url?.startsWith("/mirror/") ?? false;
   const requestUrl = new URL(request.url ?? "/", "http://mirror.local");
   const ticket = requestUrl.searchParams.get("ticket") ?? undefined;
-  if (
-    (hostname !== config.MIRROR_HOST && !prefixedRequest) ||
-    (!validMirrorCredential(ticket) && !validMirrorCredential(session))
-  ) {
+  if (!validMirrorCredential(ticket) && !validMirrorCredential(session)) {
     socket.destroy();
     return;
   }
